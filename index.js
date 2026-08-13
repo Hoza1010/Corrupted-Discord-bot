@@ -40,6 +40,11 @@ const commands = [
         .addChannelTypes(ChannelType.GuildStageVoice)
         .setRequired(true)
     )
+    .addAttachmentOption(option =>
+      option.setName('image')
+        .setDescription('Optional thumbnail image for the announcement embed')
+        .setRequired(false)
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
 
   new SlashCommandBuilder()
@@ -174,6 +179,7 @@ client.on('interactionCreate', async interaction => {
 
     const eventName = interaction.options.getString('event-name');
     const stageChannel = interaction.options.getChannel('stage-channel');
+    const image = interaction.options.getAttachment('image');
 
     try {
       // Create the stage instance (this opens/starts the Stage)
@@ -182,10 +188,23 @@ client.on('interactionCreate', async interaction => {
         privacyLevel: 2 // GUILD_ONLY
       });
 
-      // Announce it to everyone in the channel the command was run in
+      const embed = new EmbedBuilder()
+        .setColor(0x3BA6F6)
+        .setTitle(eventName)
+        .addFields(
+          { name: 'Server', value: interaction.guild.name, inline: true },
+          { name: 'Stage Channel', value: `<#${stageChannel.id}>`, inline: true },
+          { name: '\u200B', value: '🎙️ 🔴 **Event Stage — Live**' }
+        )
+        .setTimestamp();
+
+      if (image) {
+        embed.setThumbnail(image.url);
+      }
+
       await interaction.channel.send({
-        content: `@everyone 📣 **${eventName}** has started in <#${stageChannel.id}>! Join now.
-        IP: <#1515097005137985730>`,
+        content: '@everyone',
+        embeds: [embed],
         allowedMentions: { parse: ['everyone'] }
       });
 
@@ -216,7 +235,16 @@ client.on('interactionCreate', async interaction => {
       const endedTopic = stageInstance.topic;
       await stageInstance.delete();
 
-      await interaction.channel.send(`🔚 The stage event **${endedTopic}** in <#${stageChannel.id}> has ended.`);
+      const embed = new EmbedBuilder()
+        .setColor(0x99AAB5)
+        .setTitle(endedTopic)
+        .addFields(
+          { name: 'Stage Channel', value: `<#${stageChannel.id}>`, inline: true },
+          { name: '\u200B', value: '🎙️ ⚫ **Event Stage — Ended**' }
+        )
+        .setTimestamp();
+
+      await interaction.channel.send({ embeds: [embed] });
       await interaction.editReply(`Stage event ended in <#${stageChannel.id}>.`);
     } catch (error) {
       console.error('Error ending stage:', error);
