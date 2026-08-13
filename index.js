@@ -5,7 +5,12 @@ const {
   Routes,
   SlashCommandBuilder,
   ChannelType,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+  EmbedBuilder
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -46,7 +51,17 @@ const commands = [
         .addChannelTypes(ChannelType.GuildStageVoice)
         .setRequired(true)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName('embed')
+    .setDescription('Open a form to create and send a custom embed (supports multiple lines)')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Which channel to send the embed to (defaults to this channel)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -71,7 +86,75 @@ client.once('ready', () => {
 });
 
 client.on('interactionCreate', async interaction => {
+  // Handle the embed modal submission
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('embedModal')) {
+    const title = interaction.fields.getTextInputValue('embedTitle');
+    const description = interaction.fields.getTextInputValue('embedDescription');
+    const colorInput = interaction.fields.getTextInputValue('embedColor');
+    const channelId = interaction.customId.split(':')[1];
+
+    let color = 0x5865F2; // default Discord blurple
+    if (colorInput && /^#?[0-9A-Fa-f]{6}$/.test(colorInput.trim())) {
+      color = parseInt(colorInput.trim().replace('#', ''), 16);
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(description)
+      .setColor(color)
+      .setTimestamp();
+
+    try {
+      const targetChannel = channelId ? await client.channels.fetch(channelId) : interaction.channel;
+      await targetChannel.send({ embeds: [embed] });
+      await interaction.reply({ content: `Embed sent to <#${targetChannel.id}>.`, ephemeral: true });
+    } catch (error) {
+      console.error('Error sending embed:', error);
+      await interaction.reply({ content: "Couldn't send the embed. Check the bot's permissions in that channel.", ephemeral: true });
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
+
+  // /embed - opens a form with a multi-line description box
+  if (interaction.commandName === 'embed') {
+    const targetChannel = interaction.options.getChannel('channel');
+
+    const modal = new ModalBuilder()
+      .setCustomId(`embedModal:${targetChannel ? targetChannel.id : ''}`)
+      .setTitle('Create Embed');
+
+    const titleInput = new TextInputBuilder()
+      .setCustomId('embedTitle')
+      .setLabel('Embed Title')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(256);
+
+    const descriptionInput = new TextInputBuilder()
+      .setCustomId('embedDescription')
+      .setLabel('Embed Description (multi-line supported)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(4000);
+
+    const colorInput = new TextInputBuilder()
+      .setCustomId('embedColor')
+      .setLabel('Hex color (optional, e.g. FF0000)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(7);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(titleInput),
+      new ActionRowBuilder().addComponents(descriptionInput),
+      new ActionRowBuilder().addComponents(colorInput)
+    );
+
+    await interaction.showModal(modal);
+    return;
+  }
 
   // /ping
   if (interaction.commandName === 'ping') {
