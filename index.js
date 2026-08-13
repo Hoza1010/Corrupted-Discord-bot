@@ -184,7 +184,8 @@ client.on('interactionCreate', async interaction => {
 
       // Announce it to everyone in the channel the command was run in
       await interaction.channel.send({
-        content: `@everyone 📣 **${eventName}** has started in <#${stageChannel.id}>! Join now.`,
+        content: `@everyone 📣 **${eventName}** has started in <#${stageChannel.id}>! Join now.
+        IP: <#1515097005137985730>`,
         allowedMentions: { parse: ['everyone'] }
       });
 
