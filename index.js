@@ -214,6 +214,10 @@ client.on('interactionCreate', async interaction => {
            IP: <#1515097005137985730>`, inline: true },
           { name: '\u200B', value: '🎙️ 🔴 **Event Stage — Live**' }
         )
+        .setFooter({
+          text: `Started by ${interaction.user.tag}`,
+          iconURL: interaction.user.displayAvatarURL()
+        })
         .setTimestamp();
 
       embed.setThumbnail(image ? image.url : DEFAULT_STAGE_IMAGE);
@@ -258,6 +262,10 @@ client.on('interactionCreate', async interaction => {
           { name: 'Stage Channel', value: `<#${stageChannel.id}>`, inline: true },
           { name: '\u200B', value: '🎙️ ⚫ **Event Stage — Ended**' }
         )
+        .setFooter({
+          text: `Ended by ${interaction.user.tag}`,
+          iconURL: interaction.user.displayAvatarURL()
+        })
         .setTimestamp();
 
       await interaction.channel.send({ embeds: [embed] });
