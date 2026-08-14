@@ -208,7 +208,7 @@ client.on('interactionCreate', async interaction => {
 
       const embed = new EmbedBuilder()
         .setColor(0x3BA6F6)
-        .setTitle(eventName)
+        .setDescription(`# ${eventName}`)
         .addFields(
           { name: 'Server', value: interaction.guild.name, inline: true },
           { name: 'Stage Channel', value: `<#${stageChannel.id}>`, inline: true },
