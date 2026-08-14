@@ -16,6 +16,11 @@ const {
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
+// Used whenever /start-stage is run without an image attached.
+// Override by setting a DEFAULT_STAGE_IMAGE environment variable in Railway.
+const DEFAULT_STAGE_IMAGE = process.env.DEFAULT_STAGE_IMAGE
+  || 'https://placehold.co/400x400/3BA6F6/FFFFFF?text=Event+Stage';
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -43,6 +48,11 @@ const commands = [
     .addAttachmentOption(option =>
       option.setName('image')
         .setDescription('Optional thumbnail image for the announcement embed')
+        .setRequired(false)
+    )
+    .addRoleOption(option =>
+      option.setName('ping-role')
+        .setDescription('A role to ping (leave blank to ping @everyone instead)')
         .setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
@@ -181,6 +191,14 @@ client.on('interactionCreate', async interaction => {
     const stageChannel = interaction.options.getChannel('stage-channel');
     const image = interaction.options.getAttachment('image');
 
+    const pingRole = interaction.options.getRole('ping-role');
+
+    const pingContent = pingRole ? `<@&${pingRole.id}>` : '@everyone';
+
+    const allowedMentions = pingRole
+      ? { roles: [pingRole.id] }
+      : { parse: ['everyone'] };
+
     try {
       // Create the stage instance (this opens/starts the Stage)
       await stageChannel.createStageInstance({
@@ -198,14 +216,12 @@ client.on('interactionCreate', async interaction => {
         )
         .setTimestamp();
 
-      if (image) {
-        embed.setThumbnail(image.url);
-      }
+      embed.setThumbnail(image ? image.url : DEFAULT_STAGE_IMAGE);
 
       await interaction.channel.send({
-        content: '@everyone',
+        content: pingContent,
         embeds: [embed],
-        allowedMentions: { parse: ['everyone'] }
+        allowedMentions: allowedMentions
       });
 
       await interaction.editReply(`Stage event **${eventName}** started in <#${stageChannel.id}> and announced.`);
