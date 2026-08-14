@@ -185,7 +185,7 @@ client.on('interactionCreate', async interaction => {
 
   // /start-stage
   if (interaction.commandName === 'start-stage') {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const eventName = interaction.options.getString('event-name');
     const stageChannel = interaction.options.getChannel('stage-channel');
@@ -236,7 +236,7 @@ client.on('interactionCreate', async interaction => {
 
   // /end-stage
   if (interaction.commandName === 'end-stage') {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
 
     const stageChannel = interaction.options.getChannel('stage-channel');
 
