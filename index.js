@@ -211,7 +211,8 @@ client.on('interactionCreate', async interaction => {
         .setDescription(`# ${eventName}`)
         .addFields(
           { name: 'Server', value: interaction.guild.name, inline: true },
-          { name: 'Stage Channel', value: `<#${stageChannel.id}>`, inline: true },
+          { name: 'Stage Channel', value: `<#${stageChannel.id}>
+           IP: <#1515097005137985730>`, inline: true },
           { name: '\u200B', value: '🎙️ 🔴 **Event Stage — Live**' }
         )
         .setTimestamp();
