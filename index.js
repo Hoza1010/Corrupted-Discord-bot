@@ -210,7 +210,6 @@ client.on('interactionCreate', async interaction => {
         .setColor(0x3BA6F6)
         .setDescription(`# ${eventName}`)
         .addFields(
-          { name: 'Server', value: interaction.guild.name, inline: true },
           { name: 'Stage Channel', value: `<#${stageChannel.id}>
            IP: <#1515097005137985730>`, inline: true },
           { name: '\u200B', value: '🎙️ 🔴 **Event Stage — Live**' }
