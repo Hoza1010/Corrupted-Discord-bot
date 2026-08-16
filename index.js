@@ -43,6 +43,42 @@ function saveWarns(map) {
   }
 }
 
+// Path to the config file (stores mod-log channel per server)
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch (error) {
+    console.error('Error loading config.json, starting fresh:', error);
+  }
+  return {};
+}
+
+function saveConfig(config) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  } catch (error) {
+    console.error('Error saving config.json:', error);
+  }
+}
+
+let botConfig = loadConfig(); // { [guildId]: { modLogChannelId: "..." } }
+
+async function sendModLog(guild, embed) {
+  const guildConfig = botConfig[guild.id];
+  if (!guildConfig || !guildConfig.modLogChannelId) return;
+
+  try {
+    const channel = await guild.channels.fetch(guildConfig.modLogChannelId);
+    if (channel) await channel.send({ embeds: [embed] });
+  } catch (error) {
+    console.error('Error sending to mod-log channel:', error);
+  }
+}
+
 // Used whenever /start-stage is run without an image attached.
 // Override by setting a DEFAULT_STAGE_IMAGE environment variable in Railway.
 const DEFAULT_STAGE_IMAGE = process.env.DEFAULT_STAGE_IMAGE
@@ -68,6 +104,20 @@ function formatDuration(ms) {
     604800000: '1 week'
   };
   return map[ms] || `${ms}ms`;
+}
+
+function modLogEmbed({ action, color, target, moderator, reason }) {
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(action)
+    .addFields(
+      { name: 'User', value: target, inline: true },
+      { name: 'Moderator', value: moderator, inline: true }
+    )
+    .setTimestamp();
+
+  if (reason) embed.addFields({ name: 'Reason', value: reason });
+  return embed;
 }
 
 // Define slash commands
@@ -198,7 +248,26 @@ const commands = [
         .setMinValue(1)
         .setMaxValue(100)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription("View a member's current warn count")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to check').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('set-modlog')
+    .setDescription('Set the channel where moderation actions get logged')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('The channel to send mod-log messages to')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -417,6 +486,10 @@ client.on('interactionCreate', async interaction => {
 
       await member.kick(reason);
       await interaction.editReply(`👢 Kicked **${targetUser.tag}**. Reason: ${reason}`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '👢 Member Kicked', color: 0xE67E22,
+        target: targetUser.tag, moderator: interaction.user.tag, reason
+      }));
     } catch (error) {
       console.error('Error kicking member:', error);
       await interaction.editReply("Couldn't kick that member. Make sure I have the **Kick Members** permission.");
@@ -440,6 +513,10 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.guild.members.ban(targetUser.id, { reason });
       await interaction.editReply(`🔨 Banned **${targetUser.tag}**. Reason: ${reason}`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔨 Member Banned', color: 0xE74C3C,
+        target: targetUser.tag, moderator: interaction.user.tag, reason
+      }));
     } catch (error) {
       console.error('Error banning member:', error);
       await interaction.editReply("Couldn't ban that member. Make sure I have the **Ban Members** permission.");
@@ -455,6 +532,10 @@ client.on('interactionCreate', async interaction => {
     try {
       await interaction.guild.members.unban(userId);
       await interaction.editReply(`✅ Unbanned user with ID **${userId}**.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '✅ Member Unbanned', color: 0x2ECC71,
+        target: userId, moderator: interaction.user.tag
+      }));
     } catch (error) {
       console.error('Error unbanning user:', error);
       await interaction.editReply("Couldn't unban that user. Double check the ID and that they're actually banned.");
@@ -480,6 +561,10 @@ client.on('interactionCreate', async interaction => {
       await member.timeout(durationMs, reason);
       const durationLabel = formatDuration(durationMs);
       await interaction.editReply(`🔇 Timed out **${targetUser.tag}** for ${durationLabel}. Reason: ${reason}`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔇 Member Timed Out', color: 0xF1C40F,
+        target: targetUser.tag, moderator: interaction.user.tag, reason: `${reason} (Duration: ${durationLabel})`
+      }));
     } catch (error) {
       console.error('Error timing out member:', error);
       await interaction.editReply("Couldn't timeout that member. Make sure I have the **Moderate Members** permission.");
@@ -518,6 +603,11 @@ client.on('interactionCreate', async interaction => {
     }
 
     await interaction.editReply(resultMessage);
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '⚠️ Member Warned', color: 0xF39C12,
+      target: targetUser.tag, moderator: interaction.user.tag,
+      reason: `${reason} (Warn ${currentCount}/${WARN_LIMIT})`
+    }));
     return;
   }
 
@@ -529,10 +619,39 @@ client.on('interactionCreate', async interaction => {
     try {
       const deleted = await interaction.channel.bulkDelete(amount, true);
       await interaction.editReply(`🧹 Deleted ${deleted.size} message(s).`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🧹 Messages Cleared', color: 0x95A5A6,
+        target: `#${interaction.channel.name}`, moderator: interaction.user.tag,
+        reason: `${deleted.size} message(s) deleted`
+      }));
     } catch (error) {
       console.error('Error clearing messages:', error);
       await interaction.editReply("Couldn't delete those messages. Note: Discord only allows bulk-deleting messages younger than 14 days.");
     }
+    return;
+  }
+
+  // /warnings
+  if (interaction.commandName === 'warnings') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const key = `${interaction.guild.id}-${targetUser.id}`;
+    const count = warnCounts.get(key) || 0;
+
+    await interaction.editReply(`**${targetUser.tag}** currently has **${count}/${WARN_LIMIT}** warns.`);
+    return;
+  }
+
+  // /set-modlog
+  if (interaction.commandName === 'set-modlog') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.options.getChannel('channel');
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    botConfig[interaction.guild.id].modLogChannelId = channel.id;
+    saveConfig(botConfig);
+
+    await interaction.editReply(`✅ Mod-log channel set to <#${channel.id}>. All future moderation actions will be logged there.`);
     return;
   }
 });
