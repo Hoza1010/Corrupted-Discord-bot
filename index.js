@@ -12,9 +12,36 @@ const {
   ActionRowBuilder,
   EmbedBuilder
 } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+
+// Path to the warns file on the Railway Volume (falls back to local folder if no volume is mounted)
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '.';
+const WARNS_FILE = path.join(DATA_DIR, 'warns.json');
+
+function loadWarns() {
+  try {
+    if (fs.existsSync(WARNS_FILE)) {
+      const raw = fs.readFileSync(WARNS_FILE, 'utf8');
+      return new Map(Object.entries(JSON.parse(raw)));
+    }
+  } catch (error) {
+    console.error('Error loading warns.json, starting fresh:', error);
+  }
+  return new Map();
+}
+
+function saveWarns(map) {
+  try {
+    const obj = Object.fromEntries(map);
+    fs.writeFileSync(WARNS_FILE, JSON.stringify(obj, null, 2));
+  } catch (error) {
+    console.error('Error saving warns.json:', error);
+  }
+}
 
 // Used whenever /start-stage is run without an image attached.
 // Override by setting a DEFAULT_STAGE_IMAGE environment variable in Railway.
@@ -22,8 +49,26 @@ const DEFAULT_STAGE_IMAGE = process.env.DEFAULT_STAGE_IMAGE
   || 'https://placehold.co/400x400/3BA6F6/FFFFFF?text=Event+Stage';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
+
+// Tracks warns per user, per server. Persisted to disk so it survives restarts.
+// Key: "guildId-userId" -> number of warns
+const warnCounts = loadWarns();
+const WARN_LIMIT = 3;
+const AUTO_TIMEOUT_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+function formatDuration(ms) {
+  const map = {
+    60000: '60 seconds',
+    300000: '5 minutes',
+    600000: '10 minutes',
+    3600000: '1 hour',
+    86400000: '1 day',
+    604800000: '1 week'
+  };
+  return map[ms] || `${ms}ms`;
+}
 
 // Define slash commands
 const commands = [
@@ -76,7 +121,84 @@ const commands = [
         .setDescription('Which channel to send the embed to (defaults to this channel)')
         .addChannelTypes(ChannelType.GuildText)
         .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Kick a member from the server')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to kick').setRequired(true)
     )
+    .addStringOption(option =>
+      option.setName('reason').setDescription('Reason for the kick').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Ban a member from the server')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to ban').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('reason').setDescription('Reason for the ban').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName('unban')
+    .setDescription('Unban a user by their user ID')
+    .addStringOption(option =>
+      option.setName('user-id').setDescription('The user ID to unban').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName('timeout')
+    .setDescription('Timeout (mute) a member for a set duration')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to timeout').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('duration')
+        .setDescription('How long to timeout the member')
+        .setRequired(true)
+        .addChoices(
+          { name: '60 seconds', value: '60000' },
+          { name: '5 minutes', value: '300000' },
+          { name: '10 minutes', value: '600000' },
+          { name: '1 hour', value: '3600000' },
+          { name: '1 day', value: '86400000' },
+          { name: '1 week', value: '604800000' }
+        )
+    )
+    .addStringOption(option =>
+      option.setName('reason').setDescription('Reason for the timeout').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Warn a member (3 warns = automatic 3-day timeout)')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to warn').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('reason').setDescription('Reason for the warning').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('Delete a number of recent messages from a channel')
+    .addIntegerOption(option =>
+      option.setName('amount')
+        .setDescription('How many messages to delete (1-100)')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -275,6 +397,141 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply(
         `Couldn't end the stage. Make sure the bot has **Manage Channels** permission.`
       );
+    }
+    return;
+  }
+
+  // /kick
+  if (interaction.commandName === 'kick') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (!member.kickable) {
+        await interaction.editReply("I can't kick that member — they may have a higher role than me.");
+        return;
+      }
+
+      await member.kick(reason);
+      await interaction.editReply(`👢 Kicked **${targetUser.tag}**. Reason: ${reason}`);
+    } catch (error) {
+      console.error('Error kicking member:', error);
+      await interaction.editReply("Couldn't kick that member. Make sure I have the **Kick Members** permission.");
+    }
+    return;
+  }
+
+  // /ban
+  if (interaction.commandName === 'ban') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+
+      if (member && !member.bannable) {
+        await interaction.editReply("I can't ban that member — they may have a higher role than me.");
+        return;
+      }
+
+      await interaction.guild.members.ban(targetUser.id, { reason });
+      await interaction.editReply(`🔨 Banned **${targetUser.tag}**. Reason: ${reason}`);
+    } catch (error) {
+      console.error('Error banning member:', error);
+      await interaction.editReply("Couldn't ban that member. Make sure I have the **Ban Members** permission.");
+    }
+    return;
+  }
+
+  // /unban
+  if (interaction.commandName === 'unban') {
+    await interaction.deferReply({ ephemeral: true });
+    const userId = interaction.options.getString('user-id').trim();
+
+    try {
+      await interaction.guild.members.unban(userId);
+      await interaction.editReply(`✅ Unbanned user with ID **${userId}**.`);
+    } catch (error) {
+      console.error('Error unbanning user:', error);
+      await interaction.editReply("Couldn't unban that user. Double check the ID and that they're actually banned.");
+    }
+    return;
+  }
+
+  // /timeout
+  if (interaction.commandName === 'timeout') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const durationMs = parseInt(interaction.options.getString('duration'), 10);
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (!member.moderatable) {
+        await interaction.editReply("I can't timeout that member — they may have a higher role than me.");
+        return;
+      }
+
+      await member.timeout(durationMs, reason);
+      const durationLabel = formatDuration(durationMs);
+      await interaction.editReply(`🔇 Timed out **${targetUser.tag}** for ${durationLabel}. Reason: ${reason}`);
+    } catch (error) {
+      console.error('Error timing out member:', error);
+      await interaction.editReply("Couldn't timeout that member. Make sure I have the **Moderate Members** permission.");
+    }
+    return;
+  }
+
+  // /warn
+  if (interaction.commandName === 'warn') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason');
+    const key = `${interaction.guild.id}-${targetUser.id}`;
+
+    const currentCount = (warnCounts.get(key) || 0) + 1;
+    warnCounts.set(key, currentCount);
+    saveWarns(warnCounts);
+
+    let resultMessage = `⚠️ Warned **${targetUser.tag}** (${currentCount}/${WARN_LIMIT}). Reason: ${reason}`;
+
+    if (currentCount >= WARN_LIMIT) {
+      try {
+        const member = await interaction.guild.members.fetch(targetUser.id);
+        if (member.moderatable) {
+          await member.timeout(AUTO_TIMEOUT_MS, `Reached ${WARN_LIMIT} warns`);
+          resultMessage += `\n🔇 This member reached ${WARN_LIMIT} warns and has been automatically timed out for 3 days.`;
+        } else {
+          resultMessage += `\n⚠️ This member reached ${WARN_LIMIT} warns, but I couldn't time them out (higher role than me).`;
+        }
+      } catch (error) {
+        console.error('Error auto-timing out warned member:', error);
+        resultMessage += `\n⚠️ This member reached ${WARN_LIMIT} warns, but the automatic timeout failed.`;
+      }
+      warnCounts.set(key, 0);
+      saveWarns(warnCounts);
+    }
+
+    await interaction.editReply(resultMessage);
+    return;
+  }
+
+  // /clear
+  if (interaction.commandName === 'clear') {
+    await interaction.deferReply({ ephemeral: true });
+    const amount = interaction.options.getInteger('amount');
+
+    try {
+      const deleted = await interaction.channel.bulkDelete(amount, true);
+      await interaction.editReply(`🧹 Deleted ${deleted.size} message(s).`);
+    } catch (error) {
+      console.error('Error clearing messages:', error);
+      await interaction.editReply("Couldn't delete those messages. Note: Discord only allows bulk-deleting messages younger than 14 days.");
     }
     return;
   }
