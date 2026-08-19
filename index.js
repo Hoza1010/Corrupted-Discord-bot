@@ -267,7 +267,31 @@ const commands = [
         .addChannelTypes(ChannelType.GuildText)
         .setRequired(true)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('remove-warn')
+    .setDescription("Remove one warn from a member's count")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to remove a warn from').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('clear-warnings')
+    .setDescription("Reset a member's warn count to 0")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to clear warns for').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('untimeout')
+    .setDescription("Remove an active timeout from a member")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to remove the timeout from').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -652,6 +676,69 @@ client.on('interactionCreate', async interaction => {
     saveConfig(botConfig);
 
     await interaction.editReply(`✅ Mod-log channel set to <#${channel.id}>. All future moderation actions will be logged there.`);
+    return;
+  }
+
+  // /remove-warn
+  if (interaction.commandName === 'remove-warn') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const key = `${interaction.guild.id}-${targetUser.id}`;
+
+    const currentCount = warnCounts.get(key) || 0;
+    const newCount = Math.max(0, currentCount - 1);
+    warnCounts.set(key, newCount);
+    saveWarns(warnCounts);
+
+    await interaction.editReply(`✅ Removed a warn from **${targetUser.tag}**. Now at **${newCount}/${WARN_LIMIT}**.`);
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '➖ Warn Removed', color: 0x2ECC71,
+      target: targetUser.tag, moderator: interaction.user.tag,
+      reason: `Now at ${newCount}/${WARN_LIMIT}`
+    }));
+    return;
+  }
+
+  // /clear-warnings
+  if (interaction.commandName === 'clear-warnings') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const key = `${interaction.guild.id}-${targetUser.id}`;
+
+    warnCounts.set(key, 0);
+    saveWarns(warnCounts);
+
+    await interaction.editReply(`✅ Cleared all warns for **${targetUser.tag}**.`);
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '🧹 Warns Cleared', color: 0x2ECC71,
+      target: targetUser.tag, moderator: interaction.user.tag
+    }));
+    return;
+  }
+
+  // /untimeout
+  if (interaction.commandName === 'untimeout') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (!member.communicationDisabledUntil) {
+        await interaction.editReply(`**${targetUser.tag}** doesn't currently have an active timeout.`);
+        return;
+      }
+
+      await member.timeout(null);
+      await interaction.editReply(`✅ Removed timeout from **${targetUser.tag}**.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔊 Timeout Removed', color: 0x2ECC71,
+        target: targetUser.tag, moderator: interaction.user.tag
+      }));
+    } catch (error) {
+      console.error('Error removing timeout:', error);
+      await interaction.editReply("Couldn't remove that member's timeout. Make sure I have the **Moderate Members** permission.");
+    }
     return;
   }
 });
