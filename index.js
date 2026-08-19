@@ -13,10 +13,12 @@ const {
   EmbedBuilder,
   ButtonBuilder,
   ButtonStyle,
-  AttachmentBuilder
+  AttachmentBuilder,
+  Partials
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const JSZip = require('jszip');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -88,7 +90,12 @@ const DEFAULT_STAGE_IMAGE = process.env.DEFAULT_STAGE_IMAGE
   || 'https://placehold.co/400x400/3BA6F6/FFFFFF?text=Event+Stage';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: [Partials.Channel, Partials.Message]
 });
 
 // Tracks warns per user, per server. Persisted to disk so it survives restarts.
@@ -174,6 +181,42 @@ const commands = [
         .setDescription('Which channel to send the embed to (defaults to this channel)')
         .addChannelTypes(ChannelType.GuildText)
         .setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('image1').setDescription('Image to include (optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('image2').setDescription('Another image (optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('image3').setDescription('Another image (optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('image4').setDescription('Another image (optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('file1').setDescription('Any file to attach (mp3, pdf, etc — optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('file2').setDescription('Another file to attach (optional)').setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option.setName('file3').setDescription('Another file to attach (optional)').setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('dm-embed')
+    .setDescription("Build an embed with many files via DM — the bot messages you to collect uploads, then zips them")
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Which channel to send the finished embed to')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('zip-name')
+        .setDescription('Name for the zip file (without .zip)')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -335,28 +378,62 @@ client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}. Bot is online!`);
 });
 
+// Temporarily holds image URLs between /embed being run and the modal being submitted
+const pendingEmbedImages = new Map();
+
 client.on('interactionCreate', async interaction => {
   // Handle the embed modal submission
   if (interaction.isModalSubmit() && interaction.customId.startsWith('embedModal')) {
     const title = interaction.fields.getTextInputValue('embedTitle');
     const description = interaction.fields.getTextInputValue('embedDescription');
     const colorInput = interaction.fields.getTextInputValue('embedColor');
-    const channelId = interaction.customId.split(':')[1];
+    const token = interaction.customId.split(':')[1];
+
+    const pending = pendingEmbedImages.get(token) || { images: [], files: [], channelId: null };
+    pendingEmbedImages.delete(token);
 
     let color = 0x5865F2; // default Discord blurple
     if (colorInput && /^#?[0-9A-Fa-f]{6}$/.test(colorInput.trim())) {
       color = parseInt(colorInput.trim().replace('#', ''), 16);
     }
 
-    const embed = new EmbedBuilder()
+    const mainEmbed = new EmbedBuilder()
       .setTitle(title)
       .setDescription(description)
       .setColor(color)
       .setTimestamp();
 
+    const embeds = [mainEmbed];
+
+    if (pending.images.length > 0) {
+      // Giving every embed the same .setURL() makes Discord group the images
+      // into a clean grid instead of stacking them as separate blocks.
+      const groupUrl = `https://embed-gallery.local/${token}`;
+      mainEmbed.setURL(groupUrl);
+      mainEmbed.setImage(pending.images[0]);
+
+      for (let i = 1; i < pending.images.length; i++) {
+        embeds.push(new EmbedBuilder().setURL(groupUrl).setImage(pending.images[i]).setColor(color));
+      }
+    }
+
+    // Non-image files (mp3, pdf, etc.) get re-downloaded and attached as normal
+    // Discord file attachments — they show below the embed with their own
+    // play button / download icon, since embeds can only display images.
+    const filesToSend = [];
+    for (const file of pending.files) {
+      try {
+        const response = await fetch(file.url);
+        const arrayBuffer = await response.arrayBuffer();
+        filesToSend.push(new AttachmentBuilder(Buffer.from(arrayBuffer), { name: file.name }));
+      } catch (error) {
+        console.error(`Error re-fetching attachment ${file.name}:`, error);
+      }
+    }
+
     try {
-      const targetChannel = channelId ? await client.channels.fetch(channelId) : interaction.channel;
-      await targetChannel.send({ embeds: [embed] });
+      const targetChannel = pending.channelId ? await client.channels.fetch(pending.channelId) : interaction.channel;
+      await targetChannel.send({ embeds, files: filesToSend });
       await interaction.reply({ content: `Embed sent to <#${targetChannel.id}>.`, ephemeral: true });
     } catch (error) {
       console.error('Error sending embed:', error);
@@ -365,15 +442,177 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  // Handle the dm-embed modal submission — builds the embed, then starts DM file collection
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('dmEmbedModal')) {
+    const title = interaction.fields.getTextInputValue('embedTitle');
+    const description = interaction.fields.getTextInputValue('embedDescription');
+    const colorInput = interaction.fields.getTextInputValue('embedColor');
+    const token = interaction.customId.split(':')[1];
+
+    const pending = pendingEmbedImages.get(token);
+    pendingEmbedImages.delete(token);
+
+    if (!pending) {
+      await interaction.reply({ content: "Something went wrong — that session expired. Please run /dm-embed again.", ephemeral: true });
+      return;
+    }
+
+    let color = 0x5865F2;
+    if (colorInput && /^#?[0-9A-Fa-f]{6}$/.test(colorInput.trim())) {
+      color = parseInt(colorInput.trim().replace('#', ''), 16);
+    }
+
+    await interaction.reply({ content: "📬 Check your DMs — I've sent you instructions for uploading files.", ephemeral: true });
+
+    let dmChannel;
+    try {
+      dmChannel = await interaction.user.createDM();
+      await dmChannel.send(
+        `📎 Send me the files you want zipped and attached to your embed for **${title}**.\n` +
+        `You can send them one at a time or several per message. Type **done** when finished (or I'll auto-finish after 5 minutes).`
+      );
+    } catch (error) {
+      console.error('Error opening DM channel:', error);
+      await interaction.followUp({ content: "I couldn't DM you — make sure your DMs are open to server members and try again.", ephemeral: true });
+      return;
+    }
+
+    const collectedFiles = [];
+
+    const collector = dmChannel.createMessageCollector({
+      filter: msg => msg.author.id === interaction.user.id,
+      time: 5 * 60 * 1000 // 5 minutes
+    });
+
+    collector.on('collect', async msg => {
+      if (msg.content.trim().toLowerCase() === 'done') {
+        collector.stop('done');
+        return;
+      }
+
+      if (msg.attachments.size > 0) {
+        for (const attachment of msg.attachments.values()) {
+          collectedFiles.push({ url: attachment.url, name: attachment.name });
+        }
+        await dmChannel.send(`Got it — ${msg.attachments.size} file(s) added (${collectedFiles.length} total so far). Send more, or type **done**.`);
+      }
+    });
+
+    collector.on('end', async () => {
+      if (collectedFiles.length === 0) {
+        await dmChannel.send("No files were received, so I didn't create the embed. Run the command again if you'd like to retry.");
+        return;
+      }
+
+      await dmChannel.send(`⏳ Zipping ${collectedFiles.length} file(s) and posting your embed...`);
+
+      const zip = new JSZip();
+      for (const file of collectedFiles) {
+        try {
+          const response = await fetch(file.url);
+          const arrayBuffer = await response.arrayBuffer();
+          zip.file(file.name, Buffer.from(arrayBuffer));
+        } catch (error) {
+          console.error(`Error fetching ${file.name} for zip:`, error);
+        }
+      }
+
+      try {
+        const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+        const zipAttachment = new AttachmentBuilder(zipBuffer, { name: `${pending.zipName}.zip` });
+
+        const embed = new EmbedBuilder()
+          .setTitle(title)
+          .setDescription(description)
+          .setColor(color)
+          .setFooter({ text: `${collectedFiles.length} file(s) attached as ${pending.zipName}.zip` })
+          .setTimestamp();
+
+        const targetChannel = await client.channels.fetch(pending.channelId);
+        await targetChannel.send({ embeds: [embed], files: [zipAttachment] });
+        await dmChannel.send(`✅ Done! Posted in <#${pending.channelId}>.`);
+      } catch (error) {
+        console.error('Error building/sending zip:', error);
+        await dmChannel.send("Something went wrong while zipping or sending the files — they may be too large combined (Discord's limit is 25MB per upload on most servers).");
+      }
+    });
+
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   // /embed - opens a form with a multi-line description box
   if (interaction.commandName === 'embed') {
     const targetChannel = interaction.options.getChannel('channel');
+    const images = ['image1', 'image2', 'image3', 'image4']
+      .map(name => interaction.options.getAttachment(name))
+      .filter(Boolean)
+      .map(attachment => attachment.url);
+    const files = ['file1', 'file2', 'file3']
+      .map(name => interaction.options.getAttachment(name))
+      .filter(Boolean)
+      .map(attachment => ({ url: attachment.url, name: attachment.name }));
+
+    const token = interaction.id;
+    pendingEmbedImages.set(token, {
+      images,
+      files,
+      channelId: targetChannel ? targetChannel.id : null
+    });
 
     const modal = new ModalBuilder()
-      .setCustomId(`embedModal:${targetChannel ? targetChannel.id : ''}`)
+      .setCustomId(`embedModal:${token}`)
       .setTitle('Create Embed');
+
+    const titleInput = new TextInputBuilder()
+      .setCustomId('embedTitle')
+      .setLabel('Embed Title')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(256);
+
+    const descriptionInput = new TextInputBuilder()
+      .setCustomId('embedDescription')
+      .setLabel('Embed Description (multi-line supported)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(4000);
+
+    const colorInput = new TextInputBuilder()
+      .setCustomId('embedColor')
+      .setLabel('Hex color (optional, e.g. FF0000)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(7);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(titleInput),
+      new ActionRowBuilder().addComponents(descriptionInput),
+      new ActionRowBuilder().addComponents(colorInput)
+    );
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // /dm-embed - opens the same style modal, but collects files via DM afterward
+  if (interaction.commandName === 'dm-embed') {
+    const targetChannel = interaction.options.getChannel('channel');
+    const zipName = interaction.options.getString('zip-name').replace(/[^a-zA-Z0-9-_ ]/g, '').trim() || 'files';
+
+    const token = interaction.id;
+    pendingEmbedImages.set(token, {
+      images: [],
+      files: [],
+      channelId: targetChannel.id,
+      zipName,
+      dmUserId: interaction.user.id
+    });
+
+    const modal = new ModalBuilder()
+      .setCustomId(`dmEmbedModal:${token}`)
+      .setTitle('Create Embed (files via DM)');
 
     const titleInput = new TextInputBuilder()
       .setCustomId('embedTitle')
