@@ -12,7 +12,8 @@ const {
   ActionRowBuilder,
   EmbedBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  AttachmentBuilder
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -69,13 +70,13 @@ function saveConfig(config) {
 
 let botConfig = loadConfig(); // { [guildId]: { modLogChannelId: "..." } }
 
-async function sendModLog(guild, embed) {
+async function sendModLog(guild, embed, options = {}) {
   const guildConfig = botConfig[guild.id];
   if (!guildConfig || !guildConfig.modLogChannelId) return;
 
   try {
     const channel = await guild.channels.fetch(guildConfig.modLogChannelId);
-    if (channel) await channel.send({ embeds: [embed] });
+    if (channel) await channel.send({ embeds: [embed], files: options.files || [] });
   } catch (error) {
     console.error('Error sending to mod-log channel:', error);
   }
@@ -804,12 +805,26 @@ client.on('interactionCreate', async interaction => {
     await buttonInteraction.update({ content: `🧹 Deleting ${label}... this may take a moment.`, components: [] });
 
     let deletedTotal = 0;
+    const transcriptLines = [];
+
+    function recordBatch(fetched) {
+      // Newest messages come first from fetch(); reverse so the transcript reads oldest -> newest
+      const sorted = [...fetched.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      for (const msg of sorted) {
+        const author = msg.author ? msg.author.tag : 'Unknown user';
+        const time = new Date(msg.createdTimestamp).toISOString();
+        const content = msg.content && msg.content.length > 0 ? msg.content : '[no text content — embed, attachment, or system message]';
+        transcriptLines.push(`[${time}] ${author}: ${content}`);
+      }
+    }
+
     try {
       if (all) {
         let keepGoing = true;
         while (keepGoing) {
           const fetched = await interaction.channel.messages.fetch({ limit: 100 });
           if (fetched.size === 0) break;
+          recordBatch(fetched);
           const deleted = await interaction.channel.bulkDelete(fetched, true);
           deletedTotal += deleted.size;
           if (deleted.size < fetched.size) keepGoing = false; // hit messages older than 14 days
@@ -820,6 +835,7 @@ client.on('interactionCreate', async interaction => {
           const batchSize = Math.min(remaining, 100);
           const fetched = await interaction.channel.messages.fetch({ limit: batchSize });
           if (fetched.size === 0) break;
+          recordBatch(fetched);
           const deleted = await interaction.channel.bulkDelete(fetched, true);
           deletedTotal += deleted.size;
           remaining -= batchSize;
@@ -828,11 +844,20 @@ client.on('interactionCreate', async interaction => {
       }
 
       await interaction.editReply({ content: `✅ Deleted ${deletedTotal} message(s).`, components: [] });
+
+      const transcriptText = transcriptLines.length > 0
+        ? transcriptLines.join('\n')
+        : '(No message content captured.)';
+      const transcriptFile = new AttachmentBuilder(
+        Buffer.from(transcriptText, 'utf8'),
+        { name: `purge-log-${Date.now()}.txt` }
+      );
+
       sendModLog(interaction.guild, modLogEmbed({
         action: '🧹 Channel Purged', color: 0x95A5A6,
         target: `#${interaction.channel.name}`, moderator: interaction.user.tag,
-        reason: `${deletedTotal} message(s) deleted${all ? ' (all)' : ''}`
-      }));
+        reason: `${deletedTotal} message(s) deleted${all ? ' (all)' : ''} — see attached transcript`
+      }), { files: [transcriptFile] });
     } catch (error) {
       console.error('Error purging messages:', error);
       await interaction.editReply({
