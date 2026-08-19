@@ -10,7 +10,9 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
-  EmbedBuilder
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -291,7 +293,24 @@ const commands = [
     .addUserOption(option =>
       option.setName('user').setDescription('The member to remove the timeout from').setRequired(true)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('purge')
+    .setDescription('Mass delete messages from this channel (with confirmation)')
+    .addIntegerOption(option =>
+      option.setName('amount')
+        .setDescription('Number of messages to delete (leave blank if using "all")')
+        .setMinValue(1)
+        .setMaxValue(1000)
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option.setName('all')
+        .setDescription('Delete ALL messages in this channel')
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -738,6 +757,88 @@ client.on('interactionCreate', async interaction => {
     } catch (error) {
       console.error('Error removing timeout:', error);
       await interaction.editReply("Couldn't remove that member's timeout. Make sure I have the **Moderate Members** permission.");
+    }
+    return;
+  }
+
+  // /purge
+  if (interaction.commandName === 'purge') {
+    const amount = interaction.options.getInteger('amount');
+    const all = interaction.options.getBoolean('all') || false;
+
+    if (!all && !amount) {
+      await interaction.reply({ content: 'Specify an **amount**, or set **all** to true.', ephemeral: true });
+      return;
+    }
+
+    const label = all ? 'ALL messages' : `${amount} message(s)`;
+
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('purge_confirm').setLabel('Confirm Purge').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('purge_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+    );
+
+    const confirmMsg = await interaction.reply({
+      content: `⚠️ Are you sure you want to delete **${label}** from this channel? This cannot be undone.`,
+      components: [confirmRow],
+      ephemeral: true,
+      fetchReply: true
+    });
+
+    let buttonInteraction;
+    try {
+      buttonInteraction = await confirmMsg.awaitMessageComponent({
+        filter: i => i.user.id === interaction.user.id,
+        time: 15000
+      });
+    } catch {
+      await interaction.editReply({ content: 'Purge cancelled (confirmation timed out).', components: [] });
+      return;
+    }
+
+    if (buttonInteraction.customId === 'purge_cancel') {
+      await buttonInteraction.update({ content: 'Purge cancelled.', components: [] });
+      return;
+    }
+
+    await buttonInteraction.update({ content: `🧹 Deleting ${label}... this may take a moment.`, components: [] });
+
+    let deletedTotal = 0;
+    try {
+      if (all) {
+        let keepGoing = true;
+        while (keepGoing) {
+          const fetched = await interaction.channel.messages.fetch({ limit: 100 });
+          if (fetched.size === 0) break;
+          const deleted = await interaction.channel.bulkDelete(fetched, true);
+          deletedTotal += deleted.size;
+          if (deleted.size < fetched.size) keepGoing = false; // hit messages older than 14 days
+        }
+      } else {
+        let remaining = amount;
+        while (remaining > 0) {
+          const batchSize = Math.min(remaining, 100);
+          const fetched = await interaction.channel.messages.fetch({ limit: batchSize });
+          if (fetched.size === 0) break;
+          const deleted = await interaction.channel.bulkDelete(fetched, true);
+          deletedTotal += deleted.size;
+          remaining -= batchSize;
+          if (deleted.size < fetched.size) break; // hit messages older than 14 days
+        }
+      }
+
+      await interaction.editReply({ content: `✅ Deleted ${deletedTotal} message(s).`, components: [] });
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🧹 Channel Purged', color: 0x95A5A6,
+        target: `#${interaction.channel.name}`, moderator: interaction.user.tag,
+        reason: `${deletedTotal} message(s) deleted${all ? ' (all)' : ''}`
+      }));
+    } catch (error) {
+      console.error('Error purging messages:', error);
+      await interaction.editReply({
+        content: `Deleted ${deletedTotal} message(s) before running into an error. Note: Discord only allows bulk-deleting messages younger than 14 days.`,
+        components: []
+      });
     }
     return;
   }
