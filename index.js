@@ -896,6 +896,12 @@ client.on('interactionCreate', async interaction => {
       .setTimestamp();
 
     await interaction.update({ embeds: [embed] });
+
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '📊 Poll Vote', color: 0x5865F2,
+      target: poll.options[optionIndex].label, moderator: interaction.user.tag,
+      reason: `Poll: "${poll.question}"`
+    }));
     return;
   }
 
@@ -929,6 +935,11 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.update({ embeds: [embed] });
     await interaction.followUp({ content: alreadyIn ? "You've left the giveaway." : "You're entered! Good luck 🍀", ephemeral: true });
+
+    sendModLog(interaction.guild, modLogEmbed({
+      action: alreadyIn ? '🎉 Giveaway Left' : '🎉 Giveaway Entered', color: 0xF1C40F,
+      target: giveaway.prize, moderator: interaction.user.tag
+    }));
     return;
   }
 
