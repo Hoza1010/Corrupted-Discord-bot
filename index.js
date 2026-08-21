@@ -226,6 +226,77 @@ function scheduleReminder(reminder) {
   }
 }
 
+// Fetches live status from the free mcsrvstat.us API (no key required)
+async function fetchMinecraftStatus(address, edition) {
+  const url = edition === 'bedrock'
+    ? `https://api.mcsrvstat.us/bedrock/3/${encodeURIComponent(address)}`
+    : `https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`;
+
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
+  return response.json();
+}
+
+function buildMcStatusEmbed(address, data) {
+  const embed = new EmbedBuilder()
+    .setTitle(`🎮 ${address}`)
+    .setColor(data.online ? 0x2ECC71 : 0xE74C3C)
+    .addFields({ name: 'Status', value: data.online ? '🟢 Online' : '🔴 Offline', inline: true })
+    .setTimestamp();
+
+  if (data.online) {
+    if (data.players) {
+      embed.addFields({ name: 'Players', value: `${data.players.online}/${data.players.max}`, inline: true });
+    }
+    if (data.version) {
+      embed.addFields({ name: 'Version', value: `${data.version}`, inline: true });
+    }
+    if (data.motd?.clean?.length) {
+      embed.addFields({ name: 'MOTD', value: data.motd.clean.join('\n') });
+    }
+    if (data.icon) {
+      // mcsrvstat returns a base64 data URI directly usable as a thumbnail
+      embed.setThumbnail(data.icon);
+    }
+  }
+
+  return embed;
+}
+
+// Tracks active mc-watch refresh timers so they can be cleared/replaced. Not persisted —
+// rebuilt automatically on startup from the saved watch config for each server.
+const mcWatchIntervals = new Map();
+
+async function refreshMcWatch(guildId) {
+  const watch = botConfig[guildId]?.mcWatch;
+  if (!watch) return;
+
+  try {
+    const data = await fetchMinecraftStatus(watch.address, watch.edition);
+    const embed = buildMcStatusEmbed(watch.address, data);
+
+    const channel = await client.channels.fetch(watch.channelId).catch(() => null);
+    if (!channel) return;
+    const message = await channel.messages.fetch(watch.messageId).catch(() => null);
+    if (!message) return;
+
+    await message.edit({ embeds: [embed] });
+  } catch (error) {
+    console.error(`Error refreshing mc-watch for guild ${guildId}:`, error);
+  }
+}
+
+function startMcWatchInterval(guildId) {
+  const existing = mcWatchIntervals.get(guildId);
+  if (existing) clearInterval(existing);
+
+  const watch = botConfig[guildId]?.mcWatch;
+  if (!watch) return;
+
+  const intervalId = setInterval(() => refreshMcWatch(guildId), watch.intervalMinutes * 60 * 1000);
+  mcWatchIntervals.set(guildId, intervalId);
+}
+
 // Define slash commands
 const commands = [
   new SlashCommandBuilder()
@@ -491,6 +562,44 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
   new SlashCommandBuilder()
+    .setName('mc-status')
+    .setDescription('Check a Minecraft server\'s status right now')
+    .addStringOption(option =>
+      option.setName('address').setDescription('Server address, e.g. play.example.com or play.example.com:25566').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('edition')
+        .setDescription('Java or Bedrock (defaults to Java)')
+        .setRequired(false)
+        .addChoices({ name: 'Java', value: 'java' }, { name: 'Bedrock', value: 'bedrock' })
+    ),
+
+  new SlashCommandBuilder()
+    .setName('mc-watch')
+    .setDescription('Post a live-updating Minecraft server status message')
+    .addStringOption(option =>
+      option.setName('address').setDescription('Server address, e.g. play.example.com or play.example.com:25566').setRequired(true)
+    )
+    .addChannelOption(option =>
+      option.setName('channel').setDescription('Which channel (defaults to this one)').addChannelTypes(ChannelType.GuildText).setRequired(false)
+    )
+    .addIntegerOption(option =>
+      option.setName('interval-minutes').setDescription('How often to refresh, in minutes (default 5, min 1)').setMinValue(1).setMaxValue(60).setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('edition')
+        .setDescription('Java or Bedrock (defaults to Java)')
+        .setRequired(false)
+        .addChoices({ name: 'Java', value: 'java' }, { name: 'Bedrock', value: 'bedrock' })
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('mc-unwatch')
+    .setDescription('Stop the live Minecraft server status updates')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
     .setName('kick')
     .setDescription('Kick a member from the server')
     .addUserOption(option =>
@@ -708,6 +817,17 @@ client.once('ready', async () => {
     scheduleReminder(reminder);
   }
   console.log(`Restored ${(botConfig.reminders || []).length} reminder(s) from disk.`);
+
+  // Resume any active mc-watch live status timers
+  let mcWatchCount = 0;
+  for (const guildId of Object.keys(botConfig)) {
+    if (botConfig[guildId]?.mcWatch) {
+      startMcWatchInterval(guildId);
+      refreshMcWatch(guildId); // refresh immediately so the status isn't stale after a restart
+      mcWatchCount++;
+    }
+  }
+  console.log(`Resumed ${mcWatchCount} mc-watch timer(s).`);
 });
 
 // Temporarily holds image URLs between /embed being run and the modal being submitted
@@ -1613,6 +1733,74 @@ client.on('interactionCreate', async interaction => {
       saveConfig(botConfig);
       await interaction.editReply('✅ Auto-role turned **off**.');
     }
+    return;
+  }
+
+  // /mc-status
+  if (interaction.commandName === 'mc-status') {
+    await interaction.deferReply();
+    const address = interaction.options.getString('address');
+    const edition = interaction.options.getString('edition') || 'java';
+
+    try {
+      const data = await fetchMinecraftStatus(address, edition);
+      const embed = buildMcStatusEmbed(address, data);
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('Error fetching Minecraft status:', error);
+      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
+    }
+    return;
+  }
+
+  // /mc-watch
+  if (interaction.commandName === 'mc-watch') {
+    await interaction.deferReply({ ephemeral: true });
+    const address = interaction.options.getString('address');
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+    const intervalMinutes = interaction.options.getInteger('interval-minutes') || 5;
+    const edition = interaction.options.getString('edition') || 'java';
+
+    try {
+      const data = await fetchMinecraftStatus(address, edition);
+      const embed = buildMcStatusEmbed(address, data);
+      const sent = await channel.send({ embeds: [embed] });
+
+      if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+      botConfig[interaction.guild.id].mcWatch = {
+        address, edition, intervalMinutes,
+        channelId: channel.id, messageId: sent.id
+      };
+      saveConfig(botConfig);
+
+      startMcWatchInterval(interaction.guild.id);
+
+      await interaction.editReply(`✅ Now watching **${address}** in <#${channel.id}>, refreshing every ${intervalMinutes} minute(s).`);
+    } catch (error) {
+      console.error('Error starting mc-watch:', error);
+      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
+    }
+    return;
+  }
+
+  // /mc-unwatch
+  if (interaction.commandName === 'mc-unwatch') {
+    await interaction.deferReply({ ephemeral: true });
+    const guildConfig = botConfig[interaction.guild.id];
+
+    if (!guildConfig?.mcWatch) {
+      await interaction.editReply("There's no active Minecraft status watch to stop.");
+      return;
+    }
+
+    const existingInterval = mcWatchIntervals.get(interaction.guild.id);
+    if (existingInterval) clearInterval(existingInterval);
+    mcWatchIntervals.delete(interaction.guild.id);
+
+    delete guildConfig.mcWatch;
+    saveConfig(botConfig);
+
+    await interaction.editReply('✅ Stopped the live Minecraft status updates.');
     return;
   }
 
