@@ -171,27 +171,48 @@ async function removeLockSticky(channel) {
   }
 }
 
+// Prevents a giveaway from being concluded twice (e.g. manually ended right before its
+// natural timer would have fired) — not persisted, since the pending setTimeout that could
+// cause a double-fire is itself lost on restart anyway.
+const concludedGiveawayIds = new Set();
+
 // Picks winners and announces them for a finished giveaway, then removes it from storage
 async function concludeGiveaway(guildId, giveaway) {
+  if (concludedGiveawayIds.has(giveaway.messageId)) return;
+  concludedGiveawayIds.add(giveaway.messageId);
+
   const guildConfig = botConfig[guildId];
   if (guildConfig?.activeGiveaways) {
     guildConfig.activeGiveaways = guildConfig.activeGiveaways.filter(g => g.messageId !== giveaway.messageId);
-    saveConfig(botConfig);
   }
+
+  const entrants = giveaway.entrants || [];
+  const shuffled = [...entrants].sort(() => 0.5 - Math.random());
+  const pickedWinners = shuffled.slice(0, giveaway.winners);
+
+  // Keep a short history so /reroll-giveaway can find this giveaway's entrant pool later
+  if (guildConfig) {
+    if (!guildConfig.endedGiveaways) guildConfig.endedGiveaways = [];
+    guildConfig.endedGiveaways.unshift({
+      messageId: giveaway.messageId,
+      channelId: giveaway.channelId,
+      prize: giveaway.prize,
+      winners: giveaway.winners,
+      entrants,
+      lastWinners: pickedWinners,
+      endedAt: Date.now()
+    });
+    guildConfig.endedGiveaways = guildConfig.endedGiveaways.slice(0, 20);
+  }
+  saveConfig(botConfig);
 
   try {
     const channel = await client.channels.fetch(giveaway.channelId);
     const message = await channel.messages.fetch(giveaway.messageId);
-    const entrants = giveaway.entrants || [];
 
-    let winnersText;
-    if (entrants.length === 0) {
-      winnersText = 'No one entered, so no winner could be picked.';
-    } else {
-      const shuffled = [...entrants].sort(() => 0.5 - Math.random());
-      const pickedWinners = shuffled.slice(0, giveaway.winners);
-      winnersText = pickedWinners.map(id => `<@${id}>`).join(', ');
-    }
+    const winnersText = entrants.length === 0
+      ? 'No one entered, so no winner could be picked.'
+      : pickedWinners.map(id => `<@${id}>`).join(', ');
 
     const endedEmbed = new EmbedBuilder()
       .setColor(0x99AAB5)
@@ -200,7 +221,9 @@ async function concludeGiveaway(guildId, giveaway) {
       .setTimestamp();
 
     await message.edit({ embeds: [endedEmbed], components: [] });
-    await channel.send(`🎉 Congratulations ${winnersText}! You won **${giveaway.prize}**!`);
+    if (entrants.length > 0) {
+      await channel.send(`🎉 Congratulations ${winnersText}! You won **${giveaway.prize}**!`);
+    }
   } catch (error) {
     console.error('Error concluding giveaway:', error);
   }
@@ -507,6 +530,26 @@ const commands = [
     .addStringOption(option => option.setName('emoji4').setDescription('Custom emoji for option 4 (optional)').setRequired(false)),
 
   new SlashCommandBuilder()
+    .setName('end-poll')
+    .setDescription('End a poll early, lock voting, and post final results')
+    .addStringOption(option =>
+      option.setName('poll')
+        .setDescription('Which poll to end — start typing its question to search')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('poll-votes')
+    .setDescription('See who voted for each option in a poll (only visible to you)')
+    .addStringOption(option =>
+      option.setName('poll')
+        .setDescription('Which poll to inspect — start typing its question to search')
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('giveaway')
     .setDescription('Start a giveaway members can enter with a button')
     .addStringOption(option => option.setName('prize').setDescription('What is being given away').setRequired(true))
@@ -530,6 +573,35 @@ const commands = [
     )
     .addStringOption(option =>
       option.setName('emoji').setDescription('Custom emoji for the join button (optional, defaults to 🎉)').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('end-giveaway')
+    .setDescription('End an active giveaway early and pick winner(s) now')
+    .addStringOption(option =>
+      option.setName('giveaway')
+        .setDescription('Which giveaway to end — start typing the prize to search')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('reroll-giveaway')
+    .setDescription('Pick new winner(s) for a giveaway that already ended')
+    .addStringOption(option =>
+      option.setName('giveaway')
+        .setDescription('Which ended giveaway to reroll — start typing the prize to search')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addIntegerOption(option =>
+      option.setName('winners')
+        .setDescription('How many new winners to pick (defaults to the original winner count)')
+        .setMinValue(1)
+        .setMaxValue(20)
+        .setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
@@ -685,18 +757,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
 
   new SlashCommandBuilder()
-    .setName('clear')
-    .setDescription('Delete a number of recent messages from a channel')
-    .addIntegerOption(option =>
-      option.setName('amount')
-        .setDescription('How many messages to delete (1-100)')
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(100)
-    )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-  new SlashCommandBuilder()
     .setName('warnings')
     .setDescription("View a member's current warn count")
     .addUserOption(option =>
@@ -827,6 +887,11 @@ client.once('ready', async () => {
     pollState.set(token, {
       question: saved.question,
       authorTag: saved.authorTag,
+      authorId: saved.authorId,
+      guildId: saved.guildId,
+      channelId: saved.channelId,
+      messageId: saved.messageId,
+      closed: !!saved.closed,
       options: saved.options.map(opt => ({ label: opt.label, emoji: opt.emoji, voters: new Set(opt.voters) }))
     });
   }
@@ -853,11 +918,29 @@ client.once('ready', async () => {
 // Temporarily holds image URLs between /embed being run and the modal being submitted
 const pendingEmbedImages = new Map();
 
+// Discord modals expire 15 minutes after being shown, so any pending entry older than that
+// can never be submitted — clean those up periodically to avoid a slow memory leak on a
+// long-running bot (e.g. from people who open /embed or /dm-embed and never submit the modal).
+const PENDING_EMBED_TTL_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const cutoff = Date.now() - PENDING_EMBED_TTL_MS;
+  for (const [token, pending] of pendingEmbedImages.entries()) {
+    if ((pending.createdAt || 0) < cutoff) pendingEmbedImages.delete(token);
+  }
+}, 5 * 60 * 1000);
+
 // Holds live vote state for button-based polls, mirrored to disk so it survives restarts.
 const pollState = new Map();
 
-function buildPollDescription(question, options) {
-  return options.map(opt => `${opt.emoji} **${opt.label}** — ${opt.voters.size} vote(s)`).join('\n\n');
+function buildPollDescription(options, closed = false) {
+  const totalVotes = options.reduce((sum, opt) => sum + opt.voters.size, 0);
+  const maxVotes = closed ? Math.max(...options.map(o => o.voters.size)) : -1;
+
+  return options.map(opt => {
+    const isWinner = closed && totalVotes > 0 && opt.voters.size === maxVotes;
+    const prefix = isWinner ? '🏆 ' : '';
+    return `${prefix}${opt.emoji} **${opt.label}** — ${opt.voters.size} vote(s)`;
+  }).join('\n\n');
 }
 
 function persistPoll(token, poll) {
@@ -865,6 +948,11 @@ function persistPoll(token, poll) {
   botConfig.polls[token] = {
     question: poll.question,
     authorTag: poll.authorTag,
+    authorId: poll.authorId,
+    guildId: poll.guildId,
+    channelId: poll.channelId,
+    messageId: poll.messageId,
+    closed: !!poll.closed,
     options: poll.options.map(opt => ({ label: opt.label, emoji: opt.emoji, voters: [...opt.voters] }))
   };
   saveConfig(botConfig);
@@ -881,6 +969,11 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (poll.closed) {
+      await interaction.reply({ content: 'This poll has ended — votes are no longer being accepted.', ephemeral: true });
+      return;
+    }
+
     const optionIndex = parseInt(optionIndexStr, 10);
 
     // Remove this user's vote from every option, then add it to the one they just clicked
@@ -891,7 +984,7 @@ client.on('interactionCreate', async interaction => {
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
       .setTitle(`📊 ${poll.question}`)
-      .setDescription(buildPollDescription(poll.question, poll.options))
+      .setDescription(buildPollDescription(poll.options))
       .setFooter({ text: `Poll started by ${poll.authorTag}` })
       .setTimestamp();
 
@@ -1101,6 +1194,59 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  // Autocomplete for the poll picker on /end-poll and /poll-votes
+  if (interaction.isAutocomplete() && (interaction.commandName === 'end-poll' || interaction.commandName === 'poll-votes')) {
+    const focused = interaction.options.getFocused().toLowerCase();
+
+    let guildPolls = [...pollState.entries()]
+      .filter(([, p]) => !p.guildId || p.guildId === interaction.guildId);
+
+    if (interaction.commandName === 'end-poll') {
+      guildPolls = guildPolls.filter(([, p]) => !p.closed);
+    }
+
+    const matches = guildPolls
+      .filter(([, p]) => p.question.toLowerCase().includes(focused))
+      .slice(0, 25)
+      .map(([, p]) => {
+        const totalVotes = p.options.reduce((sum, opt) => sum + opt.voters.size, 0);
+        const status = p.closed ? 'Closed' : 'Open';
+        let name = `[${status}] ${p.question} (${totalVotes} vote${totalVotes === 1 ? '' : 's'})`;
+        if (name.length > 100) name = name.slice(0, 97) + '...';
+        return { name, value: p.messageId };
+      });
+
+    await interaction.respond(matches);
+    return;
+  }
+
+  // Autocomplete for the giveaway picker on /end-giveaway and /reroll-giveaway
+  if (interaction.isAutocomplete() && (interaction.commandName === 'end-giveaway' || interaction.commandName === 'reroll-giveaway')) {
+    const focused = interaction.options.getFocused().toLowerCase();
+    const guildConfig = botConfig[interaction.guildId];
+
+    const pool = interaction.commandName === 'end-giveaway'
+      ? (guildConfig?.activeGiveaways || []).map(g => ({
+          messageId: g.messageId,
+          label: `${g.prize} (${(g.entrants || []).length} entrant(s), ends <t:${Math.floor(g.endTimestamp / 1000)}:R>)`
+        }))
+      : (guildConfig?.endedGiveaways || []).map(g => ({
+          messageId: g.messageId,
+          label: `${g.prize} (ended, ${g.entrants.length} entrant(s))`
+        }));
+
+    const matches = pool
+      .filter(g => g.label.toLowerCase().includes(focused))
+      .slice(0, 25)
+      .map(g => ({
+        name: g.label.length > 100 ? g.label.slice(0, 97) + '...' : g.label,
+        value: g.messageId
+      }));
+
+    await interaction.respond(matches);
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   // /embed - opens a form with a multi-line description box
@@ -1119,7 +1265,8 @@ client.on('interactionCreate', async interaction => {
     pendingEmbedImages.set(token, {
       images,
       files,
-      channelId: targetChannel ? targetChannel.id : null
+      channelId: targetChannel ? targetChannel.id : null,
+      createdAt: Date.now()
     });
 
     const modal = new ModalBuilder()
@@ -1168,7 +1315,8 @@ client.on('interactionCreate', async interaction => {
       files: [],
       channelId: targetChannel.id,
       zipName,
-      dmUserId: interaction.user.id
+      dmUserId: interaction.user.id,
+      createdAt: Date.now()
     });
 
     const modal = new ModalBuilder()
@@ -1556,7 +1704,7 @@ client.on('interactionCreate', async interaction => {
     const embed = new EmbedBuilder()
       .setColor(0x5865F2)
       .setTitle(`📊 ${question}`)
-      .setDescription(buildPollDescription(question, options))
+      .setDescription(buildPollDescription(options))
       .setFooter({ text: `Poll started by ${interaction.user.tag}` })
       .setTimestamp();
 
@@ -1576,13 +1724,124 @@ client.on('interactionCreate', async interaction => {
     );
 
     try {
-      await interaction.editReply({ embeds: [embed], components: [row] });
-      const poll = { question, options, authorTag: interaction.user.tag };
+      const sentMessage = await interaction.editReply({ embeds: [embed], components: [row] });
+      const poll = {
+        question,
+        options,
+        authorTag: interaction.user.tag,
+        authorId: interaction.user.id,
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        messageId: sentMessage.id,
+        closed: false
+      };
       pollState.set(token, poll);
       persistPoll(token, poll);
     } catch (error) {
       console.error('Error posting poll:', error);
     }
+    return;
+  }
+
+  // /end-poll
+  if (interaction.commandName === 'end-poll') {
+    await interaction.deferReply({ ephemeral: true });
+    const messageId = interaction.options.getString('poll').trim();
+
+    const entry = [...pollState.entries()].find(([, p]) =>
+      p.messageId === messageId && (!p.guildId || p.guildId === interaction.guildId)
+    );
+    if (!entry) {
+      await interaction.editReply("Couldn't find that poll — it may have already been ended, or the bot may have restarted since the list last refreshed. Try the command again and re-pick from the list.");
+      return;
+    }
+    const [token, poll] = entry;
+
+    const isAuthor = interaction.user.id === poll.authorId;
+    const isMod = interaction.member.permissions.has(PermissionFlagsBits.ManageMessages);
+    if (!isAuthor && !isMod) {
+      await interaction.editReply("You can only end polls you created, unless you have the **Manage Messages** permission.");
+      return;
+    }
+
+    if (poll.closed) {
+      await interaction.editReply('That poll is already closed.');
+      return;
+    }
+
+    poll.closed = true;
+    persistPoll(token, poll);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x99AAB5)
+      .setTitle(`📊 🔒 ${poll.question}`)
+      .setDescription(buildPollDescription(poll.options, true))
+      .setFooter({ text: `Final results • Poll started by ${poll.authorTag}` })
+      .setTimestamp();
+
+    const fallbackEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
+    const disabledRow = new ActionRowBuilder().addComponents(
+      poll.options.map((opt, i) => {
+        const button = new ButtonBuilder()
+          .setCustomId(`pollvote:${token}:${i}`)
+          .setLabel(opt.label)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        try {
+          button.setEmoji(opt.emoji);
+        } catch (error) {
+          button.setEmoji(fallbackEmojis[i]);
+        }
+        return button;
+      })
+    );
+
+    try {
+      const channel = await client.channels.fetch(poll.channelId);
+      const message = await channel.messages.fetch(poll.messageId);
+      await message.edit({ embeds: [embed], components: [disabledRow] });
+      await interaction.editReply('✅ Poll ended. Final results have been posted and voting is now locked.');
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '📊 Poll Ended', color: 0x99AAB5,
+        target: poll.question, moderator: interaction.user.tag
+      }));
+    } catch (error) {
+      console.error('Error ending poll:', error);
+      await interaction.editReply('Poll marked as closed, but I couldn\'t update the original message (it may have been deleted).');
+    }
+    return;
+  }
+
+  // /poll-votes
+  if (interaction.commandName === 'poll-votes') {
+    await interaction.deferReply({ ephemeral: true });
+    const messageId = interaction.options.getString('poll').trim();
+
+    const entry = [...pollState.entries()].find(([, p]) =>
+      p.messageId === messageId && (!p.guildId || p.guildId === interaction.guildId)
+    );
+    if (!entry) {
+      await interaction.editReply("Couldn't find that poll — try the command again and re-pick from the list.");
+      return;
+    }
+    const [, poll] = entry;
+
+    const fields = poll.options.map(opt => {
+      const voters = [...opt.voters];
+      const value = voters.length > 0
+        ? voters.map(id => `<@${id}>`).join('\n')
+        : '*No votes yet*';
+      return { name: `${opt.emoji} ${opt.label} (${voters.length})`, value: value.length > 1024 ? value.slice(0, 1000) + '\n…' : value };
+    });
+
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(`📊 Vote breakdown — ${poll.question}`)
+      .addFields(fields)
+      .setFooter({ text: poll.closed ? 'This poll is closed' : 'This poll is still open' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
     return;
   }
 
@@ -1639,6 +1898,72 @@ client.on('interactionCreate', async interaction => {
       setTimeout(() => concludeGiveaway(interaction.guild.id, giveaway), durationMs);
     } catch (error) {
       console.error('Error starting giveaway:', error);
+    }
+    return;
+  }
+
+  // /end-giveaway
+  if (interaction.commandName === 'end-giveaway') {
+    await interaction.deferReply({ ephemeral: true });
+    const messageId = interaction.options.getString('giveaway').trim();
+
+    const guildConfig = botConfig[interaction.guild.id];
+    const giveaway = guildConfig?.activeGiveaways?.find(g => g.messageId === messageId);
+
+    if (!giveaway) {
+      await interaction.editReply("Couldn't find that giveaway — it may have already ended. Try the command again and re-pick from the list.");
+      return;
+    }
+
+    await concludeGiveaway(interaction.guild.id, giveaway);
+    await interaction.editReply(`✅ Ended the giveaway for **${giveaway.prize}** early and posted the winner(s).`);
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '🎉 Giveaway Ended Early', color: 0x99AAB5,
+      target: giveaway.prize, moderator: interaction.user.tag
+    }));
+    return;
+  }
+
+  // /reroll-giveaway
+  if (interaction.commandName === 'reroll-giveaway') {
+    await interaction.deferReply({ ephemeral: true });
+    const messageId = interaction.options.getString('giveaway').trim();
+    const requestedWinners = interaction.options.getInteger('winners');
+
+    const guildConfig = botConfig[interaction.guild.id];
+    const record = guildConfig?.endedGiveaways?.find(g => g.messageId === messageId);
+
+    if (!record) {
+      await interaction.editReply("Couldn't find that giveaway in recent history — try the command again and re-pick from the list.");
+      return;
+    }
+
+    const entrants = record.entrants || [];
+    if (entrants.length === 0) {
+      await interaction.editReply("That giveaway had no entrants, so there's no one to reroll from.");
+      return;
+    }
+
+    const winnerCount = Math.min(requestedWinners || record.winners || 1, entrants.length);
+    const shuffled = [...entrants].sort(() => 0.5 - Math.random());
+    const newWinners = shuffled.slice(0, winnerCount);
+    const winnersText = newWinners.map(id => `<@${id}>`).join(', ');
+
+    record.lastWinners = newWinners;
+    saveConfig(botConfig);
+
+    try {
+      const channel = await client.channels.fetch(record.channelId);
+      await channel.send(`🔁 **Giveaway Reroll** for **${record.prize}**!\nNew winner(s): ${winnersText}`);
+      await interaction.editReply(`✅ Rerolled and announced new winner(s) in <#${record.channelId}>.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔁 Giveaway Rerolled', color: 0x99AAB5,
+        target: record.prize, moderator: interaction.user.tag,
+        reason: `New winner(s): ${winnersText}`
+      }));
+    } catch (error) {
+      console.error('Error announcing giveaway reroll:', error);
+      await interaction.editReply("Couldn't post the reroll announcement — check that I still have access to that channel.");
     }
     return;
   }
@@ -1973,26 +2298,6 @@ client.on('interactionCreate', async interaction => {
       target: targetUser.tag, moderator: interaction.user.tag,
       reason: `${reason} (Warn ${currentCount}/${WARN_LIMIT})`
     }));
-    return;
-  }
-
-  // /clear
-  if (interaction.commandName === 'clear') {
-    await interaction.deferReply({ ephemeral: true });
-    const amount = interaction.options.getInteger('amount');
-
-    try {
-      const deleted = await interaction.channel.bulkDelete(amount, true);
-      await interaction.editReply(`🧹 Deleted ${deleted.size} message(s).`);
-      sendModLog(interaction.guild, modLogEmbed({
-        action: '🧹 Messages Cleared', color: 0x95A5A6,
-        target: `#${interaction.channel.name}`, moderator: interaction.user.tag,
-        reason: `${deleted.size} message(s) deleted`
-      }));
-    } catch (error) {
-      console.error('Error clearing messages:', error);
-      await interaction.editReply("Couldn't delete those messages. Note: Discord only allows bulk-deleting messages younger than 14 days.");
-    }
     return;
   }
 
