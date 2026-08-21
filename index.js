@@ -108,8 +108,31 @@ const client = new Client({
 // Tracks warns per user, per server. Persisted to disk so it survives restarts.
 // Key: "guildId-userId" -> number of warns
 const warnCounts = loadWarns();
-const WARN_LIMIT = 3;
-const AUTO_TIMEOUT_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+// Fallback defaults — each server can override both of these with /warn-config
+const DEFAULT_WARN_LIMIT = 3;
+const DEFAULT_AUTO_TIMEOUT_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+function getWarnLimit(guildId) {
+  return botConfig[guildId]?.warnConfig?.limit || DEFAULT_WARN_LIMIT;
+}
+
+function getWarnTimeoutMs(guildId) {
+  return botConfig[guildId]?.warnConfig?.timeoutMs || DEFAULT_AUTO_TIMEOUT_MS;
+}
+
+// Selectable timeout lengths for /warn-config and /timeout (Discord's own cap is 28 days)
+const TIMEOUT_DURATION_CHOICES = [
+  { name: '60 seconds', value: '60000' },
+  { name: '5 minutes', value: '300000' },
+  { name: '10 minutes', value: '600000' },
+  { name: '1 hour', value: '3600000' },
+  { name: '1 day', value: '86400000' },
+  { name: '3 days', value: '259200000' },
+  { name: '1 week', value: '604800000' },
+  { name: '2 weeks', value: '1209600000' },
+  { name: '28 days (max)', value: '2419200000' }
+];
 
 function formatDuration(ms) {
   const map = {
@@ -118,9 +141,15 @@ function formatDuration(ms) {
     600000: '10 minutes',
     3600000: '1 hour',
     86400000: '1 day',
-    604800000: '1 week'
+    259200000: '3 days',
+    604800000: '1 week',
+    1209600000: '2 weeks',
+    2419200000: '28 days'
   };
-  return map[ms] || `${ms}ms`;
+  if (map[ms]) return map[ms];
+  if (ms % 86400000 === 0) return `${ms / 86400000} day(s)`;
+  if (ms % 3600000 === 0) return `${ms / 3600000} hour(s)`;
+  return `${Math.round(ms / 60000)} minute(s)`;
 }
 
 function modLogEmbed({ action, color, target, moderator, reason }) {
@@ -169,6 +198,50 @@ async function removeLockSticky(channel) {
   } catch (error) {
     // Message may already be gone — nothing to clean up
   }
+}
+
+// ---- Ticket system helpers ----
+const TICKET_PANEL_BUTTON_ID = 'ticket_create_panel';
+const TICKET_MODAL_ID = 'ticketCreateModal';
+const TICKET_CLOSE_BUTTON_ID = 'ticket_close';
+
+function getTicketConfig(guildId) {
+  return botConfig[guildId]?.tickets;
+}
+
+function sanitizeChannelName(name) {
+  const cleaned = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return (cleaned || 'user').slice(0, 90);
+}
+
+function ticketPanelEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle(title || '🎫 Support Tickets')
+    .setDescription(description || 'Need help? Click the button below to open a private ticket with staff.')
+    .setTimestamp();
+}
+
+function ticketPanelRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(TICKET_PANEL_BUTTON_ID).setLabel('Open a Ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary)
+  );
+}
+
+function ticketChannelEmbed(opener, reason) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🎫 Ticket Opened')
+    .setDescription(`Thanks for reaching out, <@${opener.id}>! Staff will be with you shortly.\nClick **Close Ticket** below once this is resolved.`)
+    .setTimestamp();
+  if (reason) embed.addFields({ name: 'Reason', value: reason });
+  return embed;
+}
+
+function ticketCloseRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(TICKET_CLOSE_BUTTON_ID).setLabel('Close Ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger)
+  );
 }
 
 // Prevents a giveaway from being concluded twice (e.g. manually ended right before its
@@ -731,14 +804,7 @@ const commands = [
       option.setName('duration')
         .setDescription('How long to timeout the member')
         .setRequired(true)
-        .addChoices(
-          { name: '60 seconds', value: '60000' },
-          { name: '5 minutes', value: '300000' },
-          { name: '10 minutes', value: '600000' },
-          { name: '1 hour', value: '3600000' },
-          { name: '1 day', value: '86400000' },
-          { name: '1 week', value: '604800000' }
-        )
+        .addChoices(...TIMEOUT_DURATION_CHOICES)
     )
     .addStringOption(option =>
       option.setName('reason').setDescription('Reason for the timeout').setRequired(false)
@@ -747,7 +813,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('warn')
-    .setDescription('Warn a member (3 warns = automatic 3-day timeout)')
+    .setDescription('Warn a member (auto-timeout once they hit the configured warn limit)')
     .addUserOption(option =>
       option.setName('user').setDescription('The member to warn').setRequired(true)
     )
@@ -755,6 +821,24 @@ const commands = [
       option.setName('reason').setDescription('Reason for the warning').setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('warn-config')
+    .setDescription('View or set this server\'s warn limit and auto-timeout duration')
+    .addIntegerOption(option =>
+      option.setName('limit')
+        .setDescription('Warns needed before auto-timeout (default 3)')
+        .setMinValue(1)
+        .setMaxValue(20)
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('timeout-duration')
+        .setDescription('How long the auto-timeout lasts (default 3 days)')
+        .setRequired(false)
+        .addChoices(...TIMEOUT_DURATION_CHOICES)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('warnings')
@@ -814,7 +898,46 @@ const commands = [
         .setDescription('Delete ALL messages in this channel')
         .setRequired(false)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+  new SlashCommandBuilder()
+    .setName('ticket-setup')
+    .setDescription('Configure the ticket system for this server')
+    .addChannelOption(option =>
+      option.setName('category')
+        .setDescription('Category new ticket channels get created under')
+        .addChannelTypes(ChannelType.GuildCategory)
+        .setRequired(true)
+    )
+    .addRoleOption(option =>
+      option.setName('support-role')
+        .setDescription('Role that can see and manage all tickets')
+        .setRequired(true)
+    )
+    .addChannelOption(option =>
+      option.setName('log-channel')
+        .setDescription('Where ticket transcripts get sent when closed (defaults to mod-log)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('ticket-panel')
+    .setDescription('Post the "Open a Ticket" button panel in a channel')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Channel to post the panel in (defaults to this one)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('title').setDescription('Panel title (optional)').setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('description').setDescription('Panel description (optional)').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
 ].map(command => command.toJSON());
 
 // Register the slash commands with Discord
@@ -1033,6 +1156,203 @@ client.on('interactionCreate', async interaction => {
       action: alreadyIn ? '🎉 Giveaway Left' : '🎉 Giveaway Entered', color: 0xF1C40F,
       target: giveaway.prize, moderator: interaction.user.tag
     }));
+    return;
+  }
+
+  // Handle the "Open a Ticket" panel button
+  if (interaction.isButton() && interaction.customId === TICKET_PANEL_BUTTON_ID) {
+    const ticketConfig = getTicketConfig(interaction.guild.id);
+    if (!ticketConfig || !ticketConfig.categoryId || !ticketConfig.supportRoleId) {
+      await interaction.reply({ content: "Ticket system isn't set up yet — ask an admin to run `/ticket-setup`.", ephemeral: true });
+      return;
+    }
+
+    const existingChannelId = ticketConfig.openByUser?.[interaction.user.id];
+    if (existingChannelId) {
+      const existingChannel = await interaction.guild.channels.fetch(existingChannelId).catch(() => null);
+      if (existingChannel) {
+        await interaction.reply({ content: `You already have an open ticket: <#${existingChannel.id}>`, ephemeral: true });
+        return;
+      }
+      // Stale reference — channel is gone, clean it up so they can open a new one
+      delete ticketConfig.openByUser[interaction.user.id];
+      saveConfig(botConfig);
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(TICKET_MODAL_ID)
+      .setTitle('Open a Ticket');
+
+    const reasonInput = new TextInputBuilder()
+      .setCustomId('ticketReason')
+      .setLabel('What do you need help with?')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(false)
+      .setMaxLength(500);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // Handle ticket creation modal submission
+  if (interaction.isModalSubmit() && interaction.customId === TICKET_MODAL_ID) {
+    await interaction.deferReply({ ephemeral: true });
+    const ticketConfig = getTicketConfig(interaction.guild.id);
+
+    if (!ticketConfig || !ticketConfig.categoryId || !ticketConfig.supportRoleId) {
+      await interaction.editReply("Ticket system isn't set up yet — ask an admin to run `/ticket-setup`.");
+      return;
+    }
+
+    const existingChannelId = ticketConfig.openByUser?.[interaction.user.id];
+    if (existingChannelId) {
+      const existingChannel = await interaction.guild.channels.fetch(existingChannelId).catch(() => null);
+      if (existingChannel) {
+        await interaction.editReply(`You already have an open ticket: <#${existingChannel.id}>`);
+        return;
+      }
+      delete ticketConfig.openByUser[interaction.user.id];
+    }
+
+    const reason = interaction.fields.getTextInputValue('ticketReason') || null;
+    ticketConfig.counter = (ticketConfig.counter || 0) + 1;
+
+    try {
+      const channelName = sanitizeChannelName(`ticket-${ticketConfig.counter}-${interaction.user.username}`);
+
+      const ticketChannel = await interaction.guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        parent: ticketConfig.categoryId,
+        permissionOverwrites: [
+          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+          { id: ticketConfig.supportRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+          { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory] }
+        ]
+      });
+
+      ticketConfig.openByUser[interaction.user.id] = ticketChannel.id;
+      ticketConfig.data[ticketChannel.id] = { userId: interaction.user.id, openedAt: Date.now(), reason };
+      saveConfig(botConfig);
+
+      await ticketChannel.send({
+        content: `<@${interaction.user.id}> <@&${ticketConfig.supportRoleId}>`,
+        embeds: [ticketChannelEmbed(interaction.user, reason)],
+        components: [ticketCloseRow()]
+      });
+
+      await interaction.editReply(`✅ Ticket created: <#${ticketChannel.id}>`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🎫 Ticket Opened', color: 0x5865F2,
+        target: `#${ticketChannel.name}`, moderator: interaction.user.tag,
+        reason: reason || 'No reason given'
+      }));
+    } catch (error) {
+      console.error('Error creating ticket channel:', error);
+      await interaction.editReply("Couldn't create your ticket channel. Make sure I have the **Manage Channels** permission.");
+    }
+    return;
+  }
+
+  // Handle the "Close Ticket" button
+  if (interaction.isButton() && interaction.customId === TICKET_CLOSE_BUTTON_ID) {
+    const ticketConfig = getTicketConfig(interaction.guild.id);
+    const ticketData = ticketConfig?.data?.[interaction.channel.id];
+
+    const isSupport = (ticketConfig?.supportRoleId && interaction.member.roles.cache.has(ticketConfig.supportRoleId))
+      || interaction.member.permissions.has(PermissionFlagsBits.ManageChannels);
+    const isOpener = ticketData?.userId === interaction.user.id;
+
+    if (!isSupport && !isOpener) {
+      await interaction.reply({ content: "You don't have permission to close this ticket.", ephemeral: true });
+      return;
+    }
+
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_close_confirm').setLabel('Confirm Close').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('ticket_close_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+    );
+
+    const confirmMsg = await interaction.reply({
+      content: '⚠️ Close this ticket? A transcript will be saved and this channel will be deleted.',
+      components: [confirmRow],
+      fetchReply: true
+    });
+
+    let buttonInteraction;
+    try {
+      buttonInteraction = await confirmMsg.awaitMessageComponent({
+        filter: i => i.user.id === interaction.user.id,
+        time: 15000
+      });
+    } catch {
+      await interaction.editReply({ content: 'Close cancelled (confirmation timed out).', components: [] });
+      return;
+    }
+
+    if (buttonInteraction.customId === 'ticket_close_cancel') {
+      await buttonInteraction.update({ content: 'Close cancelled.', components: [] });
+      return;
+    }
+
+    await buttonInteraction.update({ content: '🔒 Closing ticket and saving transcript...', components: [] });
+
+    try {
+      // Fetch full message history (oldest -> newest) for the transcript
+      const transcriptLines = [];
+      let beforeId;
+      let keepGoing = true;
+      while (keepGoing) {
+        const fetched = await interaction.channel.messages.fetch({ limit: 100, ...(beforeId ? { before: beforeId } : {}) });
+        if (fetched.size === 0) break;
+        const sorted = [...fetched.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+        for (const msg of sorted) {
+          const author = msg.author ? msg.author.tag : 'Unknown user';
+          const time = new Date(msg.createdTimestamp).toISOString();
+          const content = msg.content && msg.content.length > 0 ? msg.content : '[no text content — embed, attachment, or system message]';
+          transcriptLines.unshift(`[${time}] ${author}: ${content}`);
+        }
+        beforeId = fetched.last().id;
+        if (fetched.size < 100) keepGoing = false;
+      }
+
+      const transcriptText = transcriptLines.length > 0 ? transcriptLines.join('\n') : '(No messages captured.)';
+      const transcriptFile = new AttachmentBuilder(
+        Buffer.from(transcriptText, 'utf8'),
+        { name: `ticket-${interaction.channel.name}-${Date.now()}.txt` }
+      );
+
+      const openerId = ticketData?.userId;
+      const logChannelId = ticketConfig?.logChannelId || botConfig[interaction.guild.id]?.modLogChannelId;
+
+      if (logChannelId) {
+        const logChannel = await interaction.guild.channels.fetch(logChannelId).catch(() => null);
+        if (logChannel) {
+          await logChannel.send({
+            embeds: [modLogEmbed({
+              action: '🔒 Ticket Closed', color: 0x95A5A6,
+              target: openerId ? `<@${openerId}>` : 'Unknown user',
+              moderator: interaction.user.tag,
+              reason: `#${interaction.channel.name}`
+            })],
+            files: [transcriptFile]
+          });
+        }
+      }
+
+      if (ticketConfig) {
+        if (openerId) delete ticketConfig.openByUser[openerId];
+        delete ticketConfig.data[interaction.channel.id];
+        saveConfig(botConfig);
+      }
+
+      await interaction.channel.delete();
+    } catch (error) {
+      console.error('Error closing ticket:', error);
+      await interaction.followUp({ content: "Something went wrong closing this ticket — check my permissions (Manage Channels, Read Message History).", ephemeral: true });
+    }
     return;
   }
 
@@ -1639,7 +1959,7 @@ client.on('interactionCreate', async interaction => {
         .addFields(
           { name: 'Joined Server', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false },
           { name: 'Account Created', value: `<t:${Math.floor(targetUser.createdTimestamp / 1000)}:F>`, inline: false },
-          { name: 'Warns', value: `${warnCount}/${WARN_LIMIT}`, inline: true },
+          { name: 'Warns', value: `${warnCount}/${getWarnLimit(interaction.guild.id)}`, inline: true },
           { name: `Roles (${roles.length})`, value: roles.length > 0 ? roles.join(', ') : 'None', inline: false }
         )
         .setTimestamp();
@@ -2268,25 +2588,27 @@ client.on('interactionCreate', async interaction => {
     const targetUser = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason');
     const key = `${interaction.guild.id}-${targetUser.id}`;
+    const warnLimit = getWarnLimit(interaction.guild.id);
+    const timeoutMs = getWarnTimeoutMs(interaction.guild.id);
 
     const currentCount = (warnCounts.get(key) || 0) + 1;
     warnCounts.set(key, currentCount);
     saveWarns(warnCounts);
 
-    let resultMessage = `⚠️ Warned **${targetUser.tag}** (${currentCount}/${WARN_LIMIT}). Reason: ${reason}`;
+    let resultMessage = `⚠️ Warned **${targetUser.tag}** (${currentCount}/${warnLimit}). Reason: ${reason}`;
 
-    if (currentCount >= WARN_LIMIT) {
+    if (currentCount >= warnLimit) {
       try {
         const member = await interaction.guild.members.fetch(targetUser.id);
         if (member.moderatable) {
-          await member.timeout(AUTO_TIMEOUT_MS, `Reached ${WARN_LIMIT} warns`);
-          resultMessage += `\n🔇 This member reached ${WARN_LIMIT} warns and has been automatically timed out for 3 days.`;
+          await member.timeout(timeoutMs, `Reached ${warnLimit} warns`);
+          resultMessage += `\n🔇 This member reached ${warnLimit} warns and has been automatically timed out for ${formatDuration(timeoutMs)}.`;
         } else {
-          resultMessage += `\n⚠️ This member reached ${WARN_LIMIT} warns, but I couldn't time them out (higher role than me).`;
+          resultMessage += `\n⚠️ This member reached ${warnLimit} warns, but I couldn't time them out (higher role than me).`;
         }
       } catch (error) {
         console.error('Error auto-timing out warned member:', error);
-        resultMessage += `\n⚠️ This member reached ${WARN_LIMIT} warns, but the automatic timeout failed.`;
+        resultMessage += `\n⚠️ This member reached ${warnLimit} warns, but the automatic timeout failed.`;
       }
       warnCounts.set(key, 0);
       saveWarns(warnCounts);
@@ -2296,7 +2618,46 @@ client.on('interactionCreate', async interaction => {
     sendModLog(interaction.guild, modLogEmbed({
       action: '⚠️ Member Warned', color: 0xF39C12,
       target: targetUser.tag, moderator: interaction.user.tag,
-      reason: `${reason} (Warn ${currentCount}/${WARN_LIMIT})`
+      reason: `${reason} (Warn ${currentCount}/${warnLimit})`
+    }));
+    return;
+  }
+
+  // /warn-config
+  if (interaction.commandName === 'warn-config') {
+    await interaction.deferReply({ ephemeral: true });
+    const limit = interaction.options.getInteger('limit');
+    const timeoutDurationStr = interaction.options.getString('timeout-duration');
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    const guildConfig = botConfig[interaction.guild.id];
+    if (!guildConfig.warnConfig) guildConfig.warnConfig = {};
+
+    if (limit === null && timeoutDurationStr === null) {
+      const currentLimit = getWarnLimit(interaction.guild.id);
+      const currentTimeout = getWarnTimeoutMs(interaction.guild.id);
+      await interaction.editReply(
+        `**Current warn settings:**\n` +
+        `• Warn limit: **${currentLimit}**\n` +
+        `• Auto-timeout duration: **${formatDuration(currentTimeout)}**\n\n` +
+        `Use \`/warn-config limit:<number> timeout-duration:<choice>\` to change either.`
+      );
+      return;
+    }
+
+    if (limit !== null) guildConfig.warnConfig.limit = limit;
+    if (timeoutDurationStr !== null) guildConfig.warnConfig.timeoutMs = parseInt(timeoutDurationStr, 10);
+    saveConfig(botConfig);
+
+    await interaction.editReply(
+      `✅ Warn settings updated.\n` +
+      `• Warn limit: **${getWarnLimit(interaction.guild.id)}**\n` +
+      `• Auto-timeout duration: **${formatDuration(getWarnTimeoutMs(interaction.guild.id))}**`
+    );
+    sendModLog(interaction.guild, modLogEmbed({
+      action: '⚙️ Warn Config Updated', color: 0x5865F2,
+      target: `Limit: ${getWarnLimit(interaction.guild.id)}`, moderator: interaction.user.tag,
+      reason: `Auto-timeout: ${formatDuration(getWarnTimeoutMs(interaction.guild.id))}`
     }));
     return;
   }
@@ -2308,7 +2669,7 @@ client.on('interactionCreate', async interaction => {
     const key = `${interaction.guild.id}-${targetUser.id}`;
     const count = warnCounts.get(key) || 0;
 
-    await interaction.editReply(`**${targetUser.tag}** currently has **${count}/${WARN_LIMIT}** warns.`);
+    await interaction.editReply(`**${targetUser.tag}** currently has **${count}/${getWarnLimit(interaction.guild.id)}** warns.`);
     return;
   }
 
@@ -2336,11 +2697,11 @@ client.on('interactionCreate', async interaction => {
     warnCounts.set(key, newCount);
     saveWarns(warnCounts);
 
-    await interaction.editReply(`✅ Removed a warn from **${targetUser.tag}**. Now at **${newCount}/${WARN_LIMIT}**.`);
+    await interaction.editReply(`✅ Removed a warn from **${targetUser.tag}**. Now at **${newCount}/${getWarnLimit(interaction.guild.id)}**.`);
     sendModLog(interaction.guild, modLogEmbed({
       action: '➖ Warn Removed', color: 0x2ECC71,
       target: targetUser.tag, moderator: interaction.user.tag,
-      reason: `Now at ${newCount}/${WARN_LIMIT}`
+      reason: `Now at ${newCount}/${getWarnLimit(interaction.guild.id)}`
     }));
     return;
   }
@@ -2490,6 +2851,68 @@ client.on('interactionCreate', async interaction => {
         content: `Deleted ${deletedTotal} message(s) before running into an error. Note: Discord only allows bulk-deleting messages younger than 14 days.`,
         components: []
       });
+    }
+    return;
+  }
+
+  // /ticket-setup
+  if (interaction.commandName === 'ticket-setup') {
+    await interaction.deferReply({ ephemeral: true });
+    const category = interaction.options.getChannel('category');
+    const supportRole = interaction.options.getRole('support-role');
+    const logChannel = interaction.options.getChannel('log-channel');
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    const guildConfig = botConfig[interaction.guild.id];
+
+    guildConfig.tickets = {
+      ...(guildConfig.tickets || {}),
+      categoryId: category.id,
+      supportRoleId: supportRole.id,
+      logChannelId: logChannel ? logChannel.id : (guildConfig.tickets?.logChannelId || null),
+      counter: guildConfig.tickets?.counter || 0,
+      openByUser: guildConfig.tickets?.openByUser || {},
+      data: guildConfig.tickets?.data || {}
+    };
+    saveConfig(botConfig);
+
+    await interaction.editReply(
+      `✅ Ticket system configured.\n` +
+      `• Category: **${category.name}**\n` +
+      `• Support role: <@&${supportRole.id}>\n` +
+      `• Log channel: ${logChannel ? `<#${logChannel.id}>` : 'mod-log (if set) or none'}\n\n` +
+      `Run \`/ticket-panel\` in a channel to post the "Open a Ticket" button.`
+    );
+    return;
+  }
+
+  // /ticket-panel
+  if (interaction.commandName === 'ticket-panel') {
+    await interaction.deferReply({ ephemeral: true });
+    const ticketConfig = getTicketConfig(interaction.guild.id);
+
+    if (!ticketConfig || !ticketConfig.categoryId || !ticketConfig.supportRoleId) {
+      await interaction.editReply("Ticket system isn't set up yet. Run `/ticket-setup` first.");
+      return;
+    }
+
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+    const title = interaction.options.getString('title');
+    const description = interaction.options.getString('description');
+
+    try {
+      const sent = await channel.send({
+        embeds: [ticketPanelEmbed(title, description)],
+        components: [ticketPanelRow()]
+      });
+
+      ticketConfig.panel = { channelId: channel.id, messageId: sent.id };
+      saveConfig(botConfig);
+
+      await interaction.editReply(`✅ Ticket panel posted in <#${channel.id}>.`);
+    } catch (error) {
+      console.error('Error posting ticket panel:', error);
+      await interaction.editReply("Couldn't post the ticket panel there. Make sure I can send messages in that channel.");
     }
     return;
   }
