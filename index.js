@@ -1759,7 +1759,9 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('Error fetching Minecraft status:', error);
-      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
+      const causeMessage = error.cause ? ` | cause: ${error.cause.message || error.cause}` : '';
+      const aggMessages = error.errors ? ` | inner: ${error.errors.map(e => e.message || e.code || e).join(', ')}` : '';
+      await interaction.editReply(`Debug: \`${error.message}${causeMessage}${aggMessages}\``);
     }
     return;
   }
