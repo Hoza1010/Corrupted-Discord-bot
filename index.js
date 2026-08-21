@@ -165,6 +165,67 @@ async function removeLockSticky(channel) {
   }
 }
 
+// Picks winners and announces them for a finished giveaway, then removes it from storage
+async function concludeGiveaway(guildId, giveaway) {
+  const guildConfig = botConfig[guildId];
+  if (guildConfig?.activeGiveaways) {
+    guildConfig.activeGiveaways = guildConfig.activeGiveaways.filter(g => g.messageId !== giveaway.messageId);
+    saveConfig(botConfig);
+  }
+
+  try {
+    const channel = await client.channels.fetch(giveaway.channelId);
+    const message = await channel.messages.fetch(giveaway.messageId);
+    const entrants = giveaway.entrants || [];
+
+    let winnersText;
+    if (entrants.length === 0) {
+      winnersText = 'No one entered, so no winner could be picked.';
+    } else {
+      const shuffled = [...entrants].sort(() => 0.5 - Math.random());
+      const pickedWinners = shuffled.slice(0, giveaway.winners);
+      winnersText = pickedWinners.map(id => `<@${id}>`).join(', ');
+    }
+
+    const endedEmbed = new EmbedBuilder()
+      .setColor(0x99AAB5)
+      .setTitle(`🎉 Giveaway Ended: ${giveaway.prize}`)
+      .setDescription(`Winner(s): ${winnersText}\nTotal entrants: ${entrants.length}`)
+      .setTimestamp();
+
+    await message.edit({ embeds: [endedEmbed], components: [] });
+    await channel.send(`🎉 Congratulations ${winnersText}! You won **${giveaway.prize}**!`);
+  } catch (error) {
+    console.error('Error concluding giveaway:', error);
+  }
+}
+
+// Sends a reminder DM when its time is up, then removes it from disk
+function scheduleReminder(reminder) {
+  const remaining = reminder.fireTimestamp - Date.now();
+
+  const fire = async () => {
+    try {
+      const user = await client.users.fetch(reminder.userId);
+      const dmChannel = await user.createDM();
+      await dmChannel.send(`⏰ Reminder: ${reminder.message}`);
+    } catch (error) {
+      console.error('Error sending reminder DM:', error);
+    }
+
+    if (botConfig.reminders) {
+      botConfig.reminders = botConfig.reminders.filter(r => r.id !== reminder.id);
+      saveConfig(botConfig);
+    }
+  };
+
+  if (remaining <= 0) {
+    fire();
+  } else {
+    setTimeout(fire, remaining);
+  }
+}
+
 // Define slash commands
 const commands = [
   new SlashCommandBuilder()
@@ -340,6 +401,94 @@ const commands = [
   new SlashCommandBuilder()
     .setName('help')
     .setDescription('Post (or refresh) a list of everything this bot can do'),
+
+  new SlashCommandBuilder()
+    .setName('poll')
+    .setDescription('Post a poll with buttons (live vote counts; resets if the bot restarts)')
+    .addStringOption(option => option.setName('question').setDescription('The poll question').setRequired(true))
+    .addStringOption(option => option.setName('option1').setDescription('First option').setRequired(true))
+    .addStringOption(option => option.setName('option2').setDescription('Second option').setRequired(true))
+    .addStringOption(option => option.setName('option3').setDescription('Third option (optional)').setRequired(false))
+    .addStringOption(option => option.setName('option4').setDescription('Fourth option (optional)').setRequired(false))
+    .addStringOption(option => option.setName('emoji1').setDescription('Custom emoji for option 1 (optional)').setRequired(false))
+    .addStringOption(option => option.setName('emoji2').setDescription('Custom emoji for option 2 (optional)').setRequired(false))
+    .addStringOption(option => option.setName('emoji3').setDescription('Custom emoji for option 3 (optional)').setRequired(false))
+    .addStringOption(option => option.setName('emoji4').setDescription('Custom emoji for option 4 (optional)').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('giveaway')
+    .setDescription('Start a giveaway members can enter with a button')
+    .addStringOption(option => option.setName('prize').setDescription('What is being given away').setRequired(true))
+    .addStringOption(option =>
+      option.setName('duration')
+        .setDescription('How long the giveaway runs')
+        .setRequired(true)
+        .addChoices(
+          { name: '5 minutes', value: '300000' },
+          { name: '10 minutes', value: '600000' },
+          { name: '30 minutes', value: '1800000' },
+          { name: '1 hour', value: '3600000' },
+          { name: '6 hours', value: '21600000' },
+          { name: '1 day', value: '86400000' },
+          { name: '3 days', value: '259200000' },
+          { name: '1 week', value: '604800000' }
+        )
+    )
+    .addIntegerOption(option =>
+      option.setName('winners').setDescription('Number of winners (default 1)').setMinValue(1).setMaxValue(20).setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('emoji').setDescription('Custom emoji for the join button (optional, defaults to 🎉)').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('remind')
+    .setDescription("Get a DM reminder later (lost if the bot restarts before then)")
+    .addStringOption(option =>
+      option.setName('duration')
+        .setDescription('When to be reminded')
+        .setRequired(true)
+        .addChoices(
+          { name: '5 minutes', value: '300000' },
+          { name: '10 minutes', value: '600000' },
+          { name: '30 minutes', value: '1800000' },
+          { name: '1 hour', value: '3600000' },
+          { name: '6 hours', value: '21600000' },
+          { name: '1 day', value: '86400000' },
+          { name: '1 week', value: '604800000' }
+        )
+    )
+    .addStringOption(option => option.setName('message').setDescription('What to remind you about').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('serverinfo')
+    .setDescription('View stats about this server'),
+
+  new SlashCommandBuilder()
+    .setName('avatar')
+    .setDescription("View a member's full-size avatar")
+    .addUserOption(option => option.setName('user').setDescription('The member to check (defaults to you)').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('suggest')
+    .setDescription('Submit a suggestion for the server (posts with 👍/👎 voting)')
+    .addStringOption(option => option.setName('suggestion').setDescription('Your suggestion').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('set-suggestions-channel')
+    .setDescription('Set the channel where /suggest posts go')
+    .addChannelOption(option =>
+      option.setName('channel').setDescription('The channel for suggestions').addChannelTypes(ChannelType.GuildText).setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('autorole')
+    .setDescription('Enable/disable automatically giving new members a role when they join')
+    .addBooleanOption(option => option.setName('enabled').setDescription('Turn auto-role on or off').setRequired(true))
+    .addRoleOption(option => option.setName('role').setDescription('The role to auto-assign (required when enabling)').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
   new SlashCommandBuilder()
     .setName('kick')
@@ -530,12 +679,119 @@ client.once('ready', async () => {
       console.error(`Error refreshing help message for guild ${guildId}:`, error);
     }
   }
+
+  // Reschedule (or immediately conclude) any giveaways that were running before this restart
+  for (const guildId of Object.keys(botConfig)) {
+    const activeGiveaways = botConfig[guildId]?.activeGiveaways || [];
+    for (const giveaway of activeGiveaways) {
+      const remaining = giveaway.endTimestamp - Date.now();
+      if (remaining <= 0) {
+        concludeGiveaway(guildId, giveaway);
+      } else {
+        setTimeout(() => concludeGiveaway(guildId, giveaway), remaining);
+      }
+    }
+  }
+
+  // Rebuild in-memory poll vote state from disk
+  for (const [token, saved] of Object.entries(botConfig.polls || {})) {
+    pollState.set(token, {
+      question: saved.question,
+      authorTag: saved.authorTag,
+      options: saved.options.map(opt => ({ label: opt.label, emoji: opt.emoji, voters: new Set(opt.voters) }))
+    });
+  }
+  console.log(`Restored ${Object.keys(botConfig.polls || {}).length} poll(s) from disk.`);
+
+  // Reschedule any reminders that were pending before this restart
+  for (const reminder of botConfig.reminders || []) {
+    scheduleReminder(reminder);
+  }
+  console.log(`Restored ${(botConfig.reminders || []).length} reminder(s) from disk.`);
 });
 
 // Temporarily holds image URLs between /embed being run and the modal being submitted
 const pendingEmbedImages = new Map();
 
+// Holds live vote state for button-based polls, mirrored to disk so it survives restarts.
+const pollState = new Map();
+
+function buildPollDescription(question, options) {
+  return options.map(opt => `${opt.emoji} **${opt.label}** — ${opt.voters.size} vote(s)`).join('\n\n');
+}
+
+function persistPoll(token, poll) {
+  if (!botConfig.polls) botConfig.polls = {};
+  botConfig.polls[token] = {
+    question: poll.question,
+    authorTag: poll.authorTag,
+    options: poll.options.map(opt => ({ label: opt.label, emoji: opt.emoji, voters: [...opt.voters] }))
+  };
+  saveConfig(botConfig);
+}
+
 client.on('interactionCreate', async interaction => {
+  // Handle poll vote button clicks
+  if (interaction.isButton() && interaction.customId.startsWith('pollvote:')) {
+    const [, token, optionIndexStr] = interaction.customId.split(':');
+    const poll = pollState.get(token);
+
+    if (!poll) {
+      await interaction.reply({ content: "This poll's vote data was lost — please start a new poll.", ephemeral: true });
+      return;
+    }
+
+    const optionIndex = parseInt(optionIndexStr, 10);
+
+    // Remove this user's vote from every option, then add it to the one they just clicked
+    poll.options.forEach(opt => opt.voters.delete(interaction.user.id));
+    poll.options[optionIndex].voters.add(interaction.user.id);
+    persistPoll(token, poll);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(`📊 ${poll.question}`)
+      .setDescription(buildPollDescription(poll.question, poll.options))
+      .setFooter({ text: `Poll started by ${poll.authorTag}` })
+      .setTimestamp();
+
+    await interaction.update({ embeds: [embed] });
+    return;
+  }
+
+  // Handle giveaway join button clicks
+  if (interaction.isButton() && interaction.customId.startsWith('giveawayjoin:')) {
+    const messageId = interaction.customId.split(':')[1];
+    const guildConfig = botConfig[interaction.guild.id];
+    const giveaway = guildConfig?.activeGiveaways?.find(g => g.messageId === messageId);
+
+    if (!giveaway) {
+      await interaction.reply({ content: "This giveaway has already ended.", ephemeral: true });
+      return;
+    }
+
+    if (!giveaway.entrants) giveaway.entrants = [];
+    const alreadyIn = giveaway.entrants.includes(interaction.user.id);
+
+    if (alreadyIn) {
+      giveaway.entrants = giveaway.entrants.filter(id => id !== interaction.user.id);
+    } else {
+      giveaway.entrants.push(interaction.user.id);
+    }
+    saveConfig(botConfig);
+
+    const embed = new EmbedBuilder()
+      .setColor(0xF1C40F)
+      .setTitle(`🎉 Giveaway: ${giveaway.prize}`)
+      .setDescription(`React with the button below to enter!\nEnds: <t:${Math.floor(giveaway.endTimestamp / 1000)}:R>\nWinners: **${giveaway.winners}**\nEntrants: **${giveaway.entrants.length}**`)
+      .setFooter({ text: `Giveaway ID: ${messageId}` })
+      .setTimestamp();
+
+    await interaction.update({ embeds: [embed] });
+    await interaction.followUp({ content: alreadyIn ? "You've left the giveaway." : "You're entered! Good luck 🍀", ephemeral: true });
+    return;
+  }
+
   // Handle the embed modal submission
   if (interaction.isModalSubmit() && interaction.customId.startsWith('embedModal')) {
     const title = interaction.fields.getTextInputValue('embedTitle');
@@ -1129,6 +1385,237 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  // /poll
+  if (interaction.commandName === 'poll') {
+    await interaction.deferReply();
+    const question = interaction.options.getString('question');
+    const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
+
+    const options = [1, 2, 3, 4]
+      .map(i => ({
+        label: interaction.options.getString(`option${i}`),
+        emojiInput: interaction.options.getString(`emoji${i}`),
+        fallbackEmoji: numberEmojis[i - 1]
+      }))
+      .filter(o => o.label)
+      .map(o => ({ label: o.label, emoji: o.emojiInput || o.fallbackEmoji, voters: new Set() }));
+
+    const token = interaction.id;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(`📊 ${question}`)
+      .setDescription(buildPollDescription(question, options))
+      .setFooter({ text: `Poll started by ${interaction.user.tag}` })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      options.map((opt, i) => {
+        const button = new ButtonBuilder()
+          .setCustomId(`pollvote:${token}:${i}`)
+          .setLabel(opt.label)
+          .setStyle(ButtonStyle.Primary);
+        try {
+          button.setEmoji(opt.emoji);
+        } catch (error) {
+          button.setEmoji(numberEmojis[i]);
+        }
+        return button;
+      })
+    );
+
+    try {
+      await interaction.editReply({ embeds: [embed], components: [row] });
+      const poll = { question, options, authorTag: interaction.user.tag };
+      pollState.set(token, poll);
+      persistPoll(token, poll);
+    } catch (error) {
+      console.error('Error posting poll:', error);
+    }
+    return;
+  }
+
+  // /giveaway
+  if (interaction.commandName === 'giveaway') {
+    await interaction.deferReply();
+    const prize = interaction.options.getString('prize');
+    const durationMs = parseInt(interaction.options.getString('duration'), 10);
+    const winners = interaction.options.getInteger('winners') || 1;
+    const customEmoji = interaction.options.getString('emoji');
+    const endTimestamp = Date.now() + durationMs;
+
+    const embed = new EmbedBuilder()
+      .setColor(0xF1C40F)
+      .setTitle(`🎉 Giveaway: ${prize}`)
+      .setDescription(`React with the button below to enter!\nEnds: <t:${Math.floor(endTimestamp / 1000)}:R>\nWinners: **${winners}**\nEntrants: **0**`)
+      .setFooter({ text: `Started by ${interaction.user.tag}` })
+      .setTimestamp();
+
+    // Button customId needs the message ID, so send first with a placeholder, then edit
+    const placeholderRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('giveawayjoin:pending').setLabel('Enter Giveaway').setStyle(ButtonStyle.Success).setEmoji('🎉')
+    );
+
+    try {
+      const sent = await interaction.editReply({ embeds: [embed], components: [placeholderRow], fetchReply: true });
+
+      const joinButton = new ButtonBuilder()
+        .setCustomId(`giveawayjoin:${sent.id}`)
+        .setLabel('Enter Giveaway')
+        .setStyle(ButtonStyle.Success);
+      try {
+        joinButton.setEmoji(customEmoji || '🎉');
+      } catch (error) {
+        joinButton.setEmoji('🎉');
+      }
+      const finalRow = new ActionRowBuilder().addComponents(joinButton);
+      await sent.edit({ components: [finalRow] });
+
+      if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+      if (!botConfig[interaction.guild.id].activeGiveaways) botConfig[interaction.guild.id].activeGiveaways = [];
+
+      const giveaway = {
+        messageId: sent.id,
+        channelId: interaction.channel.id,
+        prize,
+        winners,
+        endTimestamp,
+        entrants: []
+      };
+      botConfig[interaction.guild.id].activeGiveaways.push(giveaway);
+      saveConfig(botConfig);
+
+      setTimeout(() => concludeGiveaway(interaction.guild.id, giveaway), durationMs);
+    } catch (error) {
+      console.error('Error starting giveaway:', error);
+    }
+    return;
+  }
+
+  // /remind
+  if (interaction.commandName === 'remind') {
+    await interaction.deferReply({ ephemeral: true });
+    const durationMs = parseInt(interaction.options.getString('duration'), 10);
+    const reminderMessage = interaction.options.getString('message');
+    const fireTimestamp = Date.now() + durationMs;
+
+    const reminder = { id: interaction.id, userId: interaction.user.id, message: reminderMessage, fireTimestamp };
+    if (!botConfig.reminders) botConfig.reminders = [];
+    botConfig.reminders.push(reminder);
+    saveConfig(botConfig);
+
+    await interaction.editReply(`⏰ Got it — I'll DM you in ${formatDuration(durationMs)}.`);
+    scheduleReminder(reminder);
+    return;
+  }
+
+  // /serverinfo
+  if (interaction.commandName === 'serverinfo') {
+    await interaction.deferReply();
+    const guild = interaction.guild;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(guild.name)
+      .setThumbnail(guild.iconURL())
+      .addFields(
+        { name: 'Members', value: `${guild.memberCount}`, inline: true },
+        { name: 'Boost Level', value: `${guild.premiumTier}`, inline: true },
+        { name: 'Boosts', value: `${guild.premiumSubscriptionCount || 0}`, inline: true },
+        { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:F>`, inline: false },
+        { name: 'Owner', value: `<@${guild.ownerId}>`, inline: false }
+      )
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+    return;
+  }
+
+  // /avatar
+  if (interaction.commandName === 'avatar') {
+    await interaction.deferReply();
+    const targetUser = interaction.options.getUser('user') || interaction.user;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(`${targetUser.tag}'s Avatar`)
+      .setImage(targetUser.displayAvatarURL({ size: 1024 }))
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+    return;
+  }
+
+  // /suggest
+  if (interaction.commandName === 'suggest') {
+    await interaction.deferReply({ ephemeral: true });
+    const suggestion = interaction.options.getString('suggestion');
+    const suggestionsChannelId = botConfig[interaction.guild.id]?.suggestionsChannelId;
+
+    if (!suggestionsChannelId) {
+      await interaction.editReply("No suggestions channel has been set yet. Ask a server admin to run **/set-suggestions-channel** first.");
+      return;
+    }
+
+    try {
+      const channel = await client.channels.fetch(suggestionsChannelId);
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setDescription(suggestion)
+        .setFooter({ text: `Suggested by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() })
+        .setTimestamp();
+
+      const sent = await channel.send({ embeds: [embed] });
+      await sent.react('👍');
+      await sent.react('👎');
+
+      await interaction.editReply(`✅ Suggestion posted in <#${suggestionsChannelId}>.`);
+    } catch (error) {
+      console.error('Error posting suggestion:', error);
+      await interaction.editReply("Couldn't post that suggestion. Make sure I have permission to send messages in the suggestions channel.");
+    }
+    return;
+  }
+
+  // /set-suggestions-channel
+  if (interaction.commandName === 'set-suggestions-channel') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.options.getChannel('channel');
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    botConfig[interaction.guild.id].suggestionsChannelId = channel.id;
+    saveConfig(botConfig);
+
+    await interaction.editReply(`✅ Suggestions will now be posted in <#${channel.id}>.`);
+    return;
+  }
+
+  // /autorole
+  if (interaction.commandName === 'autorole') {
+    await interaction.deferReply({ ephemeral: true });
+    const enabled = interaction.options.getBoolean('enabled');
+    const role = interaction.options.getRole('role');
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    const guildConfig = botConfig[interaction.guild.id];
+
+    if (enabled) {
+      const roleId = role ? role.id : guildConfig.autoRole?.roleId;
+      if (!roleId) {
+        await interaction.editReply("Specify a **role** the first time you enable auto-role.");
+        return;
+      }
+      guildConfig.autoRole = { enabled: true, roleId };
+      saveConfig(botConfig);
+      await interaction.editReply(`✅ Auto-role turned **on**. New members will get <@&${roleId}>.`);
+    } else {
+      if (guildConfig.autoRole) guildConfig.autoRole.enabled = false;
+      saveConfig(botConfig);
+      await interaction.editReply('✅ Auto-role turned **off**.');
+    }
+    return;
+  }
+
   // /kick
   if (interaction.commandName === 'kick') {
     await interaction.deferReply({ ephemeral: true });
@@ -1501,6 +1988,18 @@ client.on('messageCreate', async message => {
     saveConfig(botConfig);
   } catch (error) {
     console.error('Error reposting lock sticky message:', error);
+  }
+});
+
+// Auto-assigns a role to new members, if enabled for this server
+client.on('guildMemberAdd', async member => {
+  const autoRole = botConfig[member.guild.id]?.autoRole;
+  if (!autoRole || !autoRole.enabled || !autoRole.roleId) return;
+
+  try {
+    await member.roles.add(autoRole.roleId);
+  } catch (error) {
+    console.error(`Error auto-assigning role in guild ${member.guild.id}:`, error);
   }
 });
 
