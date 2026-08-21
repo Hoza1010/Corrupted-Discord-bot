@@ -234,6 +234,79 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames),
 
   new SlashCommandBuilder()
+    .setName('add-role')
+    .setDescription('Add a role to a member')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to give the role to').setRequired(true)
+    )
+    .addRoleOption(option =>
+      option.setName('role').setDescription('The role to add').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName('remove-role')
+    .setDescription('Remove a role from a member')
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to remove the role from').setRequired(true)
+    )
+    .addRoleOption(option =>
+      option.setName('role').setDescription('The role to remove').setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName('slowmode')
+    .setDescription('Set slowmode for this (or another) channel')
+    .addIntegerOption(option =>
+      option.setName('seconds')
+        .setDescription('Seconds between messages (0 to disable slowmode)')
+        .setRequired(true)
+        .setMinValue(0)
+        .setMaxValue(21600)
+    )
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Which channel (defaults to this one)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName('lock')
+    .setDescription('Prevent @everyone from sending messages in a channel')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Which channel (defaults to this one)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName('unlock')
+    .setDescription('Allow @everyone to send messages in a channel again')
+    .addChannelOption(option =>
+      option.setName('channel')
+        .setDescription('Which channel (defaults to this one)')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName('userinfo')
+    .setDescription("View a member's roles, join date, and warn count")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to check (defaults to you)').setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Post (or refresh) a list of everything this bot can do'),
+
+  new SlashCommandBuilder()
     .setName('kick')
     .setDescription('Kick a member from the server')
     .addUserOption(option =>
@@ -387,9 +460,41 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
   }
 })();
 
+// Builds the always-current command list embed from the live `commands` array
+function buildHelpEmbed() {
+  const lines = commands
+    .map(cmd => `**/${cmd.name}** — ${cmd.description}`)
+    .join('\n');
+
+  return new EmbedBuilder()
+    .setColor(0x800080)
+    .setTitle('📖 Bot Commands')
+    .setDescription(lines)
+    .setFooter({ text: 'This message auto-updates whenever the bot is redeployed with new/changed commands.' })
+    .setTimestamp();
+}
+
 // When the bot is ready
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}. Bot is online!`);
+
+  // Auto-refresh any previously posted /help messages with the current command list
+  for (const guildId of Object.keys(botConfig)) {
+    const helpMessage = botConfig[guildId]?.helpMessage;
+    if (!helpMessage) continue;
+
+    try {
+      const channel = await client.channels.fetch(helpMessage.channelId).catch(() => null);
+      if (!channel) continue;
+      const message = await channel.messages.fetch(helpMessage.messageId).catch(() => null);
+      if (!message) continue;
+
+      await message.edit({ embeds: [buildHelpEmbed()] });
+      console.log(`Refreshed help message for guild ${guildId}`);
+    } catch (error) {
+      console.error(`Error refreshing help message for guild ${guildId}:`, error);
+    }
+  }
 });
 
 // Temporarily holds image URLs between /embed being run and the modal being submitted
@@ -796,6 +901,193 @@ client.on('interactionCreate', async interaction => {
     } catch (error) {
       console.error('Error changing nickname:', error);
       await interaction.editReply("Couldn't change that member's nickname. Make sure I have the **Manage Nicknames** permission.");
+    }
+    return;
+  }
+
+  // /add-role
+  if (interaction.commandName === 'add-role') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const role = interaction.options.getRole('role');
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (role.position >= interaction.guild.members.me.roles.highest.position) {
+        await interaction.editReply("I can't assign that role — it's higher than or equal to my own highest role.");
+        return;
+      }
+      if (member.roles.cache.has(role.id)) {
+        await interaction.editReply(`**${targetUser.tag}** already has the **${role.name}** role.`);
+        return;
+      }
+
+      await member.roles.add(role);
+      await interaction.editReply(`✅ Gave **${role.name}** to **${targetUser.tag}**.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '➕ Role Added', color: 0x2ECC71,
+        target: targetUser.tag, moderator: interaction.user.tag, reason: `Role: ${role.name}`
+      }));
+    } catch (error) {
+      console.error('Error adding role:', error);
+      await interaction.editReply("Couldn't add that role. Make sure I have the **Manage Roles** permission and my role is above it.");
+    }
+    return;
+  }
+
+  // /remove-role
+  if (interaction.commandName === 'remove-role') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const role = interaction.options.getRole('role');
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (role.position >= interaction.guild.members.me.roles.highest.position) {
+        await interaction.editReply("I can't remove that role — it's higher than or equal to my own highest role.");
+        return;
+      }
+      if (!member.roles.cache.has(role.id)) {
+        await interaction.editReply(`**${targetUser.tag}** doesn't have the **${role.name}** role.`);
+        return;
+      }
+
+      await member.roles.remove(role);
+      await interaction.editReply(`✅ Removed **${role.name}** from **${targetUser.tag}**.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '➖ Role Removed', color: 0xE67E22,
+        target: targetUser.tag, moderator: interaction.user.tag, reason: `Role: ${role.name}`
+      }));
+    } catch (error) {
+      console.error('Error removing role:', error);
+      await interaction.editReply("Couldn't remove that role. Make sure I have the **Manage Roles** permission and my role is above it.");
+    }
+    return;
+  }
+
+  // /slowmode
+  if (interaction.commandName === 'slowmode') {
+    await interaction.deferReply({ ephemeral: true });
+    const seconds = interaction.options.getInteger('seconds');
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+
+    try {
+      await channel.setRateLimitPerUser(seconds);
+      const label = seconds === 0 ? 'disabled' : `set to ${seconds}s`;
+      await interaction.editReply(`🐌 Slowmode ${label} in <#${channel.id}>.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🐌 Slowmode Changed', color: 0x5DADE2,
+        target: `#${channel.name}`, moderator: interaction.user.tag,
+        reason: seconds === 0 ? 'Disabled' : `${seconds} seconds`
+      }));
+    } catch (error) {
+      console.error('Error setting slowmode:', error);
+      await interaction.editReply("Couldn't set slowmode. Make sure I have the **Manage Channels** permission.");
+    }
+    return;
+  }
+
+  // /lock
+  if (interaction.commandName === 'lock') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+
+    try {
+      await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false });
+      await interaction.editReply(`🔒 Locked <#${channel.id}>.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔒 Channel Locked', color: 0xE74C3C,
+        target: `#${channel.name}`, moderator: interaction.user.tag
+      }));
+    } catch (error) {
+      console.error('Error locking channel:', error);
+      await interaction.editReply("Couldn't lock that channel. Make sure I have the **Manage Channels** permission.");
+    }
+    return;
+  }
+
+  // /unlock
+  if (interaction.commandName === 'unlock') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.options.getChannel('channel') || interaction.channel;
+
+    try {
+      await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: null });
+      await interaction.editReply(`🔓 Unlocked <#${channel.id}>.`);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '🔓 Channel Unlocked', color: 0x2ECC71,
+        target: `#${channel.name}`, moderator: interaction.user.tag
+      }));
+    } catch (error) {
+      console.error('Error unlocking channel:', error);
+      await interaction.editReply("Couldn't unlock that channel. Make sure I have the **Manage Channels** permission.");
+    }
+    return;
+  }
+
+  // /userinfo
+  if (interaction.commandName === 'userinfo') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user') || interaction.user;
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+      const roles = member.roles.cache
+        .filter(r => r.id !== interaction.guild.id)
+        .sort((a, b) => b.position - a.position)
+        .map(r => r.name);
+      const warnCount = warnCounts.get(`${interaction.guild.id}-${targetUser.id}`) || 0;
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`User Info — ${targetUser.tag}`)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+          { name: 'Joined Server', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>`, inline: false },
+          { name: 'Account Created', value: `<t:${Math.floor(targetUser.createdTimestamp / 1000)}:F>`, inline: false },
+          { name: 'Warns', value: `${warnCount}/${WARN_LIMIT}`, inline: true },
+          { name: `Roles (${roles.length})`, value: roles.length > 0 ? roles.join(', ') : 'None', inline: false }
+        )
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('Error fetching userinfo:', error);
+      await interaction.editReply("Couldn't fetch that member's info.");
+    }
+    return;
+  }
+
+  // /help
+  if (interaction.commandName === 'help') {
+    await interaction.deferReply({ ephemeral: true });
+    const embed = buildHelpEmbed();
+
+    if (!botConfig[interaction.guild.id]) botConfig[interaction.guild.id] = {};
+    const stored = botConfig[interaction.guild.id].helpMessage;
+
+    try {
+      if (stored) {
+        const channel = await client.channels.fetch(stored.channelId).catch(() => null);
+        const message = channel ? await channel.messages.fetch(stored.messageId).catch(() => null) : null;
+
+        if (message) {
+          await message.edit({ embeds: [embed] });
+          await interaction.editReply(`✅ Updated the existing help message in <#${stored.channelId}>.`);
+          return;
+        }
+      }
+
+      // No valid existing message — post a new one here and remember it
+      const sent = await interaction.channel.send({ embeds: [embed] });
+      botConfig[interaction.guild.id].helpMessage = { channelId: interaction.channel.id, messageId: sent.id };
+      saveConfig(botConfig);
+      await interaction.editReply(`✅ Posted the help message in <#${interaction.channel.id}>. It'll auto-update every time the bot redeploys.`);
+    } catch (error) {
+      console.error('Error posting/updating help message:', error);
+      await interaction.editReply("Couldn't post or update the help message.");
     }
     return;
   }
