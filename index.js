@@ -93,7 +93,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMessages
   ],
   partials: [Partials.Channel, Partials.Message]
 });
@@ -128,6 +129,40 @@ function modLogEmbed({ action, color, target, moderator, reason }) {
 
   if (reason) embed.addFields({ name: 'Reason', value: reason });
   return embed;
+}
+
+function lockStickyEmbed() {
+  return new EmbedBuilder()
+    .setColor(0xE74C3C)
+    .setDescription('🔒 **This channel is locked.** Only staff/higher-ups can chat here.');
+}
+
+async function postLockSticky(channel) {
+  try {
+    const sent = await channel.send({ embeds: [lockStickyEmbed()] });
+    if (!botConfig[channel.guild.id]) botConfig[channel.guild.id] = {};
+    if (!botConfig[channel.guild.id].stickyMessages) botConfig[channel.guild.id].stickyMessages = {};
+    botConfig[channel.guild.id].stickyMessages[channel.id] = sent.id;
+    saveConfig(botConfig);
+  } catch (error) {
+    console.error('Error posting lock sticky message:', error);
+  }
+}
+
+async function removeLockSticky(channel) {
+  const guildConfig = botConfig[channel.guild.id];
+  const messageId = guildConfig?.stickyMessages?.[channel.id];
+  if (!messageId) return;
+
+  delete guildConfig.stickyMessages[channel.id];
+  saveConfig(botConfig);
+
+  try {
+    const oldMessage = await channel.messages.fetch(messageId);
+    await oldMessage.delete();
+  } catch (error) {
+    // Message may already be gone — nothing to clean up
+  }
 }
 
 // Define slash commands
@@ -996,6 +1031,7 @@ client.on('interactionCreate', async interaction => {
 
     try {
       await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false });
+      await postLockSticky(channel);
       await interaction.editReply(`🔒 Locked <#${channel.id}>.`);
       sendModLog(interaction.guild, modLogEmbed({
         action: '🔒 Channel Locked', color: 0xE74C3C,
@@ -1015,6 +1051,7 @@ client.on('interactionCreate', async interaction => {
 
     try {
       await channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: null });
+      await removeLockSticky(channel);
       await interaction.editReply(`🔓 Unlocked <#${channel.id}>.`);
       sendModLog(interaction.guild, modLogEmbed({
         action: '🔓 Channel Unlocked', color: 0x2ECC71,
@@ -1444,6 +1481,26 @@ client.on('interactionCreate', async interaction => {
       });
     }
     return;
+  }
+});
+
+// Keeps the "channel is locked" message pinned to the bottom of any channel that has one active
+client.on('messageCreate', async message => {
+  if (message.author.bot || !message.guild) return;
+
+  const guildConfig = botConfig[message.guild.id];
+  const stickyId = guildConfig?.stickyMessages?.[message.channel.id];
+  if (!stickyId) return;
+
+  try {
+    const oldSticky = await message.channel.messages.fetch(stickyId).catch(() => null);
+    if (oldSticky) await oldSticky.delete().catch(() => {});
+
+    const newSticky = await message.channel.send({ embeds: [lockStickyEmbed()] });
+    guildConfig.stickyMessages[message.channel.id] = newSticky.id;
+    saveConfig(botConfig);
+  } catch (error) {
+    console.error('Error reposting lock sticky message:', error);
   }
 });
 
