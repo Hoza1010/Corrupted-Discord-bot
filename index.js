@@ -241,11 +241,18 @@ async function fetchMinecraftStatus(address, edition) {
     ? `https://api.mcsrvstat.us/bedrock/3/${safeAddress}`
     : `https://api.mcsrvstat.us/3/${safeAddress}`;
 
-  const response = await fetch(url, {
-    headers: { 'User-Agent': 'DiscordBot (starter-discord-bot, 1.0)' }
-  });
-  if (!response.ok) throw new Error(`API returned ${response.status}`);
-  return response.json();
+  console.log('Fetching Minecraft status URL:', url);
+  try {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'DiscordBot (starter-discord-bot, 1.0)' }
+    });
+    if (!response.ok) throw new Error(`API returned ${response.status}`);
+    return response.json();
+  } catch (error) {
+    console.error('Raw fetch error for URL', url, ':', error);
+    error.debugUrl = url;
+    throw error;
+  }
 }
 
 function buildMcStatusEmbed(address, data) {
@@ -1761,7 +1768,7 @@ client.on('interactionCreate', async interaction => {
       console.error('Error fetching Minecraft status:', error);
       const causeMessage = error.cause ? ` | cause: ${error.cause.message || error.cause}` : '';
       const aggMessages = error.errors ? ` | inner: ${error.errors.map(e => e.message || e.code || e).join(', ')}` : '';
-      await interaction.editReply(`Debug: \`${error.message}${causeMessage}${aggMessages}\``);
+      await interaction.editReply(`Debug URL: \`${error.debugUrl || 'unknown'}\`\nDebug error: \`${error.message}${causeMessage}${aggMessages}\``);
     }
     return;
   }
