@@ -220,6 +220,20 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('nick')
+    .setDescription("Change (or reset) a member's nickname")
+    .addUserOption(option =>
+      option.setName('user').setDescription('The member to rename').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('nickname')
+        .setDescription('New nickname (leave blank to reset to their default username)')
+        .setRequired(false)
+        .setMaxLength(32)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames),
+
+  new SlashCommandBuilder()
     .setName('kick')
     .setDescription('Kick a member from the server')
     .addUserOption(option =>
@@ -749,6 +763,39 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply(
         `Couldn't end the stage. Make sure the bot has **Manage Channels** permission.`
       );
+    }
+    return;
+  }
+
+  // /nick
+  if (interaction.commandName === 'nick') {
+    await interaction.deferReply({ ephemeral: true });
+    const targetUser = interaction.options.getUser('user');
+    const newNickname = interaction.options.getString('nickname'); // null if blank
+
+    try {
+      const member = await interaction.guild.members.fetch(targetUser.id);
+
+      if (!member.manageable) {
+        await interaction.editReply("I can't change that member's nickname — they may have a higher role than me.");
+        return;
+      }
+
+      await member.setNickname(newNickname, `Changed by ${interaction.user.tag}`);
+
+      const resultMessage = newNickname
+        ? `✏️ Changed **${targetUser.tag}**'s nickname to **${newNickname}**.`
+        : `✏️ Reset **${targetUser.tag}**'s nickname to their default username.`;
+
+      await interaction.editReply(resultMessage);
+      sendModLog(interaction.guild, modLogEmbed({
+        action: '✏️ Nickname Changed', color: 0x5DADE2,
+        target: targetUser.tag, moderator: interaction.user.tag,
+        reason: newNickname ? `New nickname: ${newNickname}` : 'Reset to default'
+      }));
+    } catch (error) {
+      console.error('Error changing nickname:', error);
+      await interaction.editReply("Couldn't change that member's nickname. Make sure I have the **Manage Nicknames** permission.");
     }
     return;
   }
