@@ -228,11 +228,16 @@ function scheduleReminder(reminder) {
 
 // Fetches live status from the free mcsrvstat.us API (no key required)
 async function fetchMinecraftStatus(address, edition) {
+  // The API requires a non-empty User-Agent header, and it expects any
+  // address:port to keep its literal colon rather than being percent-encoded.
+  const safeAddress = address.split(':').map(encodeURIComponent).join(':');
   const url = edition === 'bedrock'
-    ? `https://api.mcsrvstat.us/bedrock/3/${encodeURIComponent(address)}`
-    : `https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`;
+    ? `https://api.mcsrvstat.us/bedrock/3/${safeAddress}`
+    : `https://api.mcsrvstat.us/3/${safeAddress}`;
 
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'DiscordBot (starter-discord-bot, 1.0)' }
+  });
   if (!response.ok) throw new Error(`API returned ${response.status}`);
   return response.json();
 }
