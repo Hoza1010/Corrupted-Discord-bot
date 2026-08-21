@@ -19,6 +19,12 @@ const {
 const fs = require('fs');
 const path = require('path');
 const JSZip = require('jszip');
+const dns = require('node:dns');
+
+// Some container hosts (Railway included) advertise IPv6 support that doesn't
+// actually work, which makes Node's fetch() throw an AggregateError on any
+// domain with both IPv4 and IPv6 records. Preferring IPv4 first avoids that.
+dns.setDefaultResultOrder('ipv4first');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -1753,7 +1759,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('Error fetching Minecraft status:', error);
-      await interaction.editReply(`Couldn't reach that server's status API. Debug info: \`${error.message}\``);
+      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
     }
     return;
   }
