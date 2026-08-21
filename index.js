@@ -273,8 +273,10 @@ function buildMcStatusEmbed(address, data) {
       embed.addFields({ name: 'MOTD', value: data.motd.clean.join('\n') });
     }
     if (data.icon) {
-      // mcsrvstat returns a base64 data URI directly usable as a thumbnail
-      embed.setThumbnail(data.icon);
+      // The API returns the icon as a base64 data URI, which Discord embeds can't use directly
+      // (thumbnails need a real http(s) URL) — their dedicated /icon/ endpoint gives us that instead.
+      const safeAddress = address.split(':').map(encodeURIComponent).join(':');
+      embed.setThumbnail(`https://api.mcsrvstat.us/icon/${safeAddress}`);
     }
   }
 
@@ -1766,9 +1768,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('Error fetching Minecraft status:', error);
-      const causeMessage = error.cause ? ` | cause: ${error.cause.message || error.cause}` : '';
-      const aggMessages = error.errors ? ` | inner: ${error.errors.map(e => e.message || e.code || e).join(', ')}` : '';
-      await interaction.editReply(`Debug URL: \`${error.debugUrl || 'unknown'}\`\nDebug error: \`${error.message}${causeMessage}${aggMessages}\``);
+      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
     }
     return;
   }
