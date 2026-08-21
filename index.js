@@ -1753,7 +1753,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('Error fetching Minecraft status:', error);
-      await interaction.editReply("Couldn't reach that server's status API. Double check the address and try again.");
+      await interaction.editReply(`Couldn't reach that server's status API. Debug info: \`${error.message}\``);
     }
     return;
   }
